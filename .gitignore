@@ -1,0 +1,20 @@
+# Build výstupy
+app/node_modules/
+app/dist/
+node_modules/
+
+# Lokální reference (NEpublikovat — obsahuje třetí-stranu pod vlastní licencí)
+_reference/
+
+# Poznámka: assets/ se ZÁMĚRNĚ neignoruje — je v ní vlastní zdrojová grafika (logo, ikony
+# nástrojů) a do repozitáře patří. Textury not mají kanonickou kopii v app/src/renderer/assets/.
+
+# Lokální skript na vydávání verzí — obsahuje jen postup pro tenhle počítač,
+# do repozitáře nepatří (viz release.bat).
+release.bat
+RELEASE_NOTES.md
+
+# OS / editor smetí
+.DS_Store
+Thumbs.db
+*.log

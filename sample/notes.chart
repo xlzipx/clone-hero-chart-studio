@@ -1,0 +1,55 @@
+[Song]
+{
+  Name = "Forge Test Song"
+  Artist = "ChartStudio"
+  Charter = "ZIPEEK"
+  Album = "Prototypes"
+  Year = ", 2026"
+  Offset = 0
+  Resolution = 192
+  Player2 = bass
+  Difficulty = 0
+  PreviewStart = 0
+  PreviewEnd = 0
+  Genre = "rock"
+  MediaType = "cd"
+  MusicStream = "song.ogg"
+}
+[SyncTrack]
+{
+  0 = TS 4
+  0 = B 120000
+  3072 = B 140000
+  6144 = TS 3
+}
+[Events]
+{
+  0 = E "section Intro"
+  3072 = E "section Verse 1"
+}
+[ExpertSingle]
+{
+  0 = N 0 0
+  192 = N 1 0
+  384 = N 2 0
+  576 = N 3 0
+  768 = N 4 384
+  1152 = N 0 0
+  1152 = N 1 0
+  1344 = N 2 0
+  1344 = N 6 0
+  1440 = N 3 0
+  1536 = N 7 0
+  1728 = N 0 0
+  1824 = N 1 0
+  1824 = N 5 0
+  1920 = N 2 0
+  2304 = S 2 768
+  2304 = N 0 0
+  2400 = N 1 0
+  2496 = N 2 0
+  2592 = N 3 0
+  2688 = N 4 0
+  3072 = N 0 192
+  3072 = N 2 192
+}
