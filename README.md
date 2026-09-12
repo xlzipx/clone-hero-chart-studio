@@ -1,8 +1,9 @@
 # Clone Hero Chart Studio (CHS)
 
-A **Windows** desktop app for creating and editing [Clone Hero](https://clonehero.net) charts —
-drums and 5-fret guitar/bass — running on its own engine. No Unity, no third-party editor code:
-the whole editor is a dependency-free vanilla JS renderer inside an Electron shell.
+A desktop app for **Windows** and **macOS** for creating and editing
+[Clone Hero](https://clonehero.net) charts — drums and 5-fret guitar/bass — running on its own
+engine. No Unity, no third-party editor code: the whole editor is a dependency-free vanilla JS
+renderer inside an Electron shell.
 
 ![Clone Hero Chart Studio — split view with the 2D lane editor, song map, lyrics panel and 3D highway](assets/app-overview.png)
 
@@ -71,19 +72,35 @@ Sister project to [Clone Hero Chart Manager](https://github.com/xlzipx/clone-her
 
 Download the installer from
 [Releases](https://github.com/xlzipx/clone-hero-chart-studio/releases) and run it.
-Windows may warn that the publisher is unknown — the app is not signed with a paid
-certificate; choose *More info → Run anyway*.
+
+### Windows
+
+`ChartStudio-Setup-<version>.exe` — the app is not signed with a paid certificate, so Windows
+may warn that the publisher is unknown; choose *More info → Run anyway*.
+
+### macOS
+
+Two builds, pick the one that matches your Mac:
+
+- `ChartStudio-<version>-arm64.dmg` — Apple Silicon (M1 and newer)
+- `ChartStudio-<version>-x64.dmg` — Intel Macs
+
+The build is ad-hoc signed but not notarised, so the first launch needs a right-click →
+*Open* (Gatekeeper otherwise refuses to open an app from an unidentified developer). After that,
+double-click works as usual.
 
 ### Build it yourself
 
 ```bash
 cd app
 npm install
-npm run dev     # run from source
-npm run dist    # build the NSIS installer into app/dist
+npm run dev         # run from source (any platform)
+npm run dist        # Windows: build the NSIS installer into app/dist
+npm run dist:mac    # macOS:   build a .dmg into app/dist
 ```
 
-Requires Node.js. The build produces `app/dist/ChartStudio-Setup-<version>.exe`.
+Requires Node.js. `npm run dist:mac` needs a Mac, and the release workflow
+(`.github/workflows/build-macos.yml`) does that automatically in the cloud on every version tag.
 
 ---
 

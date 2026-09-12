@@ -1,0 +1,52 @@
+name: Build macOS release
+
+# Sestaví nepodepsaný .dmg pro macOS (arm64 + x64) v cloudu, ať release nevyžaduje Mac.
+# Pouští se automaticky, když se pushne tag verze (v*), a ručně přes Actions kartu
+# (workflow_dispatch) — ruční běh dmg vydá jen jako artifact workflowu, ne jako release.
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+
+jobs:
+  build-mac:
+    runs-on: macos-latest # Apple Silicon runner — arch je řízený přes electron-builder mac.target
+    permissions:
+      contents: write # kvůli přiložení .dmg k releasu
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: Install dependencies
+        working-directory: app
+        run: npm install --no-audit --no-fund
+
+      - name: Build unsigned .dmg (arm64 + x64)
+        working-directory: app
+        env:
+          # Bez tohoto by se electron-builder pokusil najít Apple Developer certifikát
+          # (identity: null v package.json ho už zakazuje, ale env je jistota pro CI).
+          CSC_IDENTITY_AUTO_DISCOVERY: false
+        run: npm run dist:mac -- --publish never
+
+      - name: Upload .dmg files as workflow artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: chartstudio-macos-dmg
+          path: app/dist/*.dmg
+          if-no-files-found: error
+
+      - name: Attach .dmg files to the release (tag builds only)
+        if: startsWith(github.ref, 'refs/tags/')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: app/dist/*.dmg
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

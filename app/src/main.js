@@ -9,6 +9,15 @@ const fs = require('fs/promises');
 const fssync = require('fs');
 const path = require('path');
 
+// Platforma. Na macOS má aplikace jinou lištu menu (nahoře v systému, ne v okně),
+// jinou příponu spustitelných binárek a jinou konvenci zavírání oken. Všechny odchylky
+// od Windows chování drží jeden přepínač, ať se nedá zapomenout na některé místo.
+const IS_MAC = process.platform === 'darwin';
+// yt-dlp přípona: Windows „yt-dlp.exe", macOS/Linux „yt-dlp" (bez přípony).
+// ffmpeg totéž. Držíme to jako konstanty, ať se dole nemusí platform-checkovat na 3 místech.
+const YTDLP_BIN = IS_MAC ? 'yt-dlp_macos' : 'yt-dlp.exe';
+const FFMPEG_BIN = IS_MAC ? 'ffmpeg' : 'ffmpeg.exe';
+
 // Windows „zamrznutí do Alt+Tabu": okno (nebo políčko) přestane reagovat na vstup, dokud ho
 // znovu neaktivuješ. Dvě příčiny, obě řešíme:
 //  1) GPU kompozitor se občas zasekne (v konzoli „GPU state invalid after WaitForGetOffsetInRange")
@@ -131,12 +140,16 @@ function createWindow(){
     },
   });
 
-  // Nativní lišta menu se SKRYJE, ale aplikační menu zůstává nastavené — drží akcelerátory
-  // (Ctrl+S, Ctrl+O, Ctrl+E…), takže se žádná zkratka neztrácí. Samotný pruh s File/Edit/View
-  // kreslí renderer vlastní (HTML): u nativního pruhu je citlivá plocha položky jen obdélník
-  // kolem textu, ne celá výška pruhu, a přejezd myší kousek níž se proto „nechytal".
-  // Bez autoHideMenuBar ho nevyvolá ani Alt.
-  win.setMenuBarVisibility(false);
+  // Nativní lišta menu se na Windows SKRYJE (Alt ji nevyvolá), ale aplikační menu zůstává
+  // nastavené — drží akcelerátory (Ctrl+S, Ctrl+O, Ctrl+E…), takže se žádná zkratka neztrácí.
+  // Samotný pruh s File/Edit/View kreslí renderer vlastní (HTML): u nativního pruhu je citlivá
+  // plocha položky jen obdélník kolem textu, ne celá výška pruhu, a přejezd myší kousek níž se
+  // proto „nechytal".
+  //
+  // Na macOS je aplikační menu v LIŠTĚ NAHOŘE OBRAZOVKY, ne v okně — `setMenuBarVisibility`
+  // se tam ignoruje a systémovou lištu není ani žádoucí schovávat; HTML lištu v okně
+  // renderer sám na Macu skryje, aby se položky nezdvojovaly.
+  if(!IS_MAC) win.setMenuBarVisibility(false);
 
   if(saved && saved.maximized) win.maximize();
   if(saved){ _wsHadSaved = true; _lastNormalSize = {width: saved.width, height: saved.height}; }   // dokud uživatel nesáhne, platí uložené
@@ -221,14 +234,20 @@ function createWindow(){
             '(window.CF && CF.state.chart) ? "CF-OK notes=" + Object.keys(CF.state.chart.tracks).length : "CF-MISSING"'
           );
           console.log('[smoke]', r, '| forge api:', await win.webContents.executeJavaScript('typeof window.forge'));
-          // Lišta menu: nativní pruh musí být schovaný, aplikační menu ale POŘÁD nastavené
-          // (drží akcelerátory), a vlastní HTML lišta vykreslená se všemi položkami.
+          // Lišta menu:
+          //  - Windows: HTML lišta vidět (File/Edit/View/Window/Keybinds), nativní schovaná.
+          //  - macOS: HTML lišta hidden (menu je nahoře v systému), nativní musí obsahovat
+          //    „ChartStudio" jako první položku (systémový App menu contract).
+          // Aplikační menu (nativní) musí být VŽDY nastavené — drží akcelerátory.
           const bar = await win.webContents.executeJavaScript(
             '(() => { const b = document.getElementById("menubar"); return b ? (b.hidden ? "hidden" : [...b.children].map(x => x.textContent).join(",")) : "chybi"; })()'
           );
           const nativeMenu = !!Menu.getApplicationMenu();
-          console.log('[smoke:menu] HTML lišta:', bar, '| nativní pruh viditelný:', win.isMenuBarVisible(), '| app menu (akcelerátory):', nativeMenu);
-          if(bar !== 'File,Edit,View,Window,Keybinds' || win.isMenuBarVisible() || !nativeMenu){
+          const nativeItems = Menu.getApplicationMenu() ? Menu.getApplicationMenu().items.map(i => i.label).join(',') : '';
+          console.log('[smoke:menu] HTML lišta:', bar, '| nativní pruh viditelný:', win.isMenuBarVisible(), '| app menu (akcelerátory):', nativeMenu, '| položky:', nativeItems);
+          const expectedBar = IS_MAC ? 'hidden' : 'File,Edit,View,Window,Keybinds';
+          const expectedNative = IS_MAC ? 'ChartStudio,File,Edit,View,Window,Keybinds' : 'File,Edit,View,Window,Keybinds';
+          if(bar !== expectedBar || (!IS_MAC && win.isMenuBarVisible()) || !nativeMenu || nativeItems !== expectedNative){
             console.log('[smoke] FAILED lišta menu');
             process.exitCode = 1;
           }
@@ -484,12 +503,18 @@ ipcMain.handle('art:save', async (e, dir, name, data) => {
 });
 
 // ---------- YouTube audio přes yt-dlp ----------
+// Hledáme v userData (kam si ji sami stahujeme) a pak v PATH. Na macOS aplikaci spuštěné
+// z Docku Chromium NEdědí uživatelův shell PATH — obvyklé Homebrew cesty (`/opt/homebrew/bin`,
+// `/usr/local/bin`) v PATH nejsou. Přidáváme je proto ručně, aby yt-dlp nainstalovaný přes
+// `brew install yt-dlp` byl vidět. Bez toho by se aplikace pořád ptala na stažení.
+const MAC_EXTRA_PATHS = IS_MAC ? ['/opt/homebrew/bin', '/usr/local/bin', '/usr/bin'] : [];
 function findYtDlp(){
-  const local = path.join(app.getPath('userData'), 'tools', 'yt-dlp.exe');
+  const local = path.join(app.getPath('userData'), 'tools', YTDLP_BIN);
   if(fssync.existsSync(local)) return local;
-  for(const d of (process.env.PATH || '').split(path.delimiter)){
+  const dirs = (process.env.PATH || '').split(path.delimiter).concat(MAC_EXTRA_PATHS);
+  for(const d of dirs){
     if(!d) continue;
-    try { const p = path.join(d, 'yt-dlp.exe'); if(fssync.existsSync(p)) return p; } catch(e){}
+    try { const p = path.join(d, YTDLP_BIN); if(fssync.existsSync(p)) return p; } catch(e){}
   }
   return null;
 }
@@ -500,16 +525,16 @@ ipcMain.handle('yt:ensure', async () => {
     const c = dialog.showMessageBoxSync(win, {
       type: 'question', buttons: ['Download yt-dlp', 'Cancel'], defaultId: 0, cancelId: 1,
       message: 'yt-dlp is required',
-      detail: 'yt-dlp.exe was not found on this computer. Download the official build from the yt-dlp GitHub releases into the app data folder?',
+      detail: YTDLP_BIN + ' was not found on this computer. Download the official build from the yt-dlp GitHub releases into the app data folder?',
     });
     if(c === 1) return {error: 'yt-dlp not available'};
   } else return {error: 'yt-dlp not found (smoke: no download)'};
   try {
     const dir = path.join(app.getPath('userData'), 'tools');
     await fs.mkdir(dir, {recursive: true});
-    const r = await fetch('https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp.exe', {redirect: 'follow'});
+    const r = await fetch('https://github.com/yt-dlp/yt-dlp/releases/latest/download/' + YTDLP_BIN, {redirect: 'follow'});
     if(!r.ok) return {error: 'Download failed: HTTP ' + r.status};
-    const dest = path.join(dir, 'yt-dlp.exe');
+    const dest = path.join(dir, YTDLP_BIN);
     // Zápis přes .tmp + rename: useknutý soubor (došlo místo, zabitá appka) se dřív tvářil jako
     // hotová instalace — findYtDlp() ho pak vracel navždy, stahování padalo a v UI nebylo jak to
     // spravit. Malý soubor navíc rovnou odmítneme, ať nezůstane vadná kopie.
@@ -519,6 +544,10 @@ ipcMain.handle('yt:ensure', async () => {
     try {
       await fs.writeFile(tmp, buf);
       await fs.rename(tmp, dest);
+      // Na Unixech je stažený soubor obyčejný „regular file" bez `x` bitu — bez chmodu by
+      // spawn skončil `EACCES: permission denied`. Windows práva neřeší, tohle je no-op.
+      if(!IS_MAC) { /* windows: přípona .exe stačí */ }
+      else { try { await fs.chmod(dest, 0o755); } catch(e){} }
     } catch(err){ try { await fs.unlink(tmp); } catch(e){} throw err; }
     return {path: dest, downloaded: true};
   } catch(err){ return {error: 'Download failed: ' + err.message}; }
@@ -560,11 +589,12 @@ ipcMain.handle('yt:cacheClear', async (e, keepPath) => {
 // a ty se stáhnou jako FRAGMENTOVANÉ mp4 (ftyp moov sidx moof mdat …), které Clone Hero nepřehraje.
 // S ffmpegem se soubor po stažení přebalí na progresivní mp4 (ftyp moov mdat) — bez překódování.
 function findFfmpeg(){
-  const local = path.join(app.getPath('userData'), 'tools', 'ffmpeg.exe');
+  const local = path.join(app.getPath('userData'), 'tools', FFMPEG_BIN);
   if(fssync.existsSync(local)) return local;
-  for(const d of (process.env.PATH || '').split(path.delimiter)){
+  const dirs = (process.env.PATH || '').split(path.delimiter).concat(MAC_EXTRA_PATHS);
+  for(const d of dirs){
     if(!d) continue;
-    try { const p = path.join(d, 'ffmpeg.exe'); if(fssync.existsSync(p)) return p; } catch(e){}
+    try { const p = path.join(d, FFMPEG_BIN); if(fssync.existsSync(p)) return p; } catch(e){}
   }
   return null;
 }
@@ -785,25 +815,45 @@ ipcMain.handle('panel:states', (e, states) => {
 });
 
 function buildMenu(){
+  // macOS má pevnou strukturu první položky (jmenuje se jako aplikace) — About/Preferences/
+  // Hide/Quit patří tam, nikam jinam. V File menu proto na Macu Quit nedáváme; systém by ji
+  // duplikoval do Cmd+Q na dvou místech.
+  const appMenu = IS_MAC ? [{
+    label: 'ChartStudio',
+    submenu: [
+      {role: 'about'},
+      {type: 'separator'},
+      {role: 'services'},
+      {type: 'separator'},
+      {role: 'hide'},
+      {role: 'hideOthers'},
+      {role: 'unhide'},
+      {type: 'separator'},
+      {role: 'quit'},
+    ],
+  }] : [];
+
+  const fileSubmenu = [
+    {label: 'New chart', accelerator: 'CmdOrCtrl+N', click: () => sendMenu('new')},
+    {label: 'Open project or chart…', accelerator: 'CmdOrCtrl+O', click: () => sendMenu('open')},
+    {label: 'Open song folder…', accelerator: 'CmdOrCtrl+Shift+O', click: () => sendMenu('openfolder')},
+    {label: 'Open recent', submenu: recentSubmenu()},
+    {label: 'Load audio…', accelerator: 'CmdOrCtrl+L', click: () => sendMenu('audio')},
+    {type: 'separator'},
+    {label: 'Save project', accelerator: 'CmdOrCtrl+S', click: () => sendMenu('save')},
+    {label: 'Save project As…', accelerator: 'CmdOrCtrl+Shift+S', click: () => sendMenu('saveas')},
+    {label: 'Save chart as .chart…', click: () => sendMenu('savechart')},
+    {label: 'Export for Clone Hero…', accelerator: 'CmdOrCtrl+E', click: () => sendMenu('export')},
+    {label: 'Export as .sng…', click: () => sendMenu('exportsng')},
+    {label: 'Export as .mid…', click: () => sendMenu('exportmid')},
+  ];
+  if(!IS_MAC){ fileSubmenu.push({type: 'separator'}, {role: 'quit'}); }
+
   const template = [
+    ...appMenu,
     {
       label: 'File',
-      submenu: [
-        {label: 'New chart', accelerator: 'CmdOrCtrl+N', click: () => sendMenu('new')},
-        {label: 'Open project or chart…', accelerator: 'CmdOrCtrl+O', click: () => sendMenu('open')},
-        {label: 'Open song folder…', accelerator: 'CmdOrCtrl+Shift+O', click: () => sendMenu('openfolder')},
-        {label: 'Open recent', submenu: recentSubmenu()},
-        {label: 'Load audio…', accelerator: 'CmdOrCtrl+L', click: () => sendMenu('audio')},
-        {type: 'separator'},
-        {label: 'Save project', accelerator: 'CmdOrCtrl+S', click: () => sendMenu('save')},
-        {label: 'Save project As…', accelerator: 'CmdOrCtrl+Shift+S', click: () => sendMenu('saveas')},
-        {label: 'Save chart as .chart…', click: () => sendMenu('savechart')},
-        {label: 'Export for Clone Hero…', accelerator: 'CmdOrCtrl+E', click: () => sendMenu('export')},
-        {label: 'Export as .sng…', click: () => sendMenu('exportsng')},
-        {label: 'Export as .mid…', click: () => sendMenu('exportmid')},
-        {type: 'separator'},
-        {role: 'quit'},
-      ],
+      submenu: fileSubmenu,
     },
     {
       label: 'Edit',
@@ -851,4 +901,11 @@ app.whenReady().then(() => {
   createWindow();
 });
 
-app.on('window-all-closed', () => app.quit());
+// Na macOS je zvykem, že aplikace po zavření posledního okna žije dál v Docku (uživatel ji
+// opustí přes ⌘Q nebo z menu ChartStudio → Quit). Na Windows/Linuxu se zavřením okna aplikace
+// končí — tady jsme okno = aplikace, jiné okno neexistuje.
+app.on('window-all-closed', () => { if(!IS_MAC) app.quit(); });
+
+// Klasické macOS „activate": kliknutí na dockovou ikonu, když už žádné okno neběží, ho otevře
+// znovu. Bez tohohle by po zavření okna appka jen tiše seděla v Docku a nešla by znovu spustit.
+app.on('activate', () => { if(!SMOKE && BrowserWindow.getAllWindows().length === 0) createWindow(); });

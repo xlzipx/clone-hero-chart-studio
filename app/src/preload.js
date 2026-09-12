@@ -2,7 +2,13 @@
 // Most mezi rendererem a hlavním procesem — jen úzké, pojmenované API.
 const { contextBridge, ipcRenderer, webUtils } = require('electron');
 
+// Renderer musí vědět, na jaké platformě běží — zkratky a texty se pro Mac (⌘)
+// vs. Windows/Linux (Ctrl) skládají jinak. Sync konstanta, aby si UI nemuselo řešit await.
+const PLATFORM = process.platform;   // 'darwin' na macOS, 'win32' na Windows, 'linux' jinde
+
 contextBridge.exposeInMainWorld('forge', {
+  // 'darwin' | 'win32' | 'linux' — pro CmdOrCtrl handlery a popisky zkratek v UI
+  platform: PLATFORM,
   // písničky (chart/mid + song.ini + stems + album/video)
   openSong:       ()     => ipcRenderer.invoke('song:openDialog'),
   openSongFolder: ()     => ipcRenderer.invoke('song:openFolderDialog'),

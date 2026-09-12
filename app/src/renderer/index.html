@@ -1430,6 +1430,30 @@ let tempoMap = [];
 const $ = id => document.getElementById(id);
 const clamp = (v,a,b) => Math.max(a, Math.min(b, v));
 
+// Platforma. Zkratky (Ctrl+C vs. ⌘C) i systémové mazací klávesy (Del vs. ⌫) se liší
+// natolik, že mít jeden IS_MAC přepínač a dva helpery je čistší než větvit každou událost.
+//   MOD(e)      = true, když je stisknutá „hlavní" modifikátorová klávesa (Ctrl na Win/Linuxu,
+//                Cmd/Meta na Macu). Používat všude, kde reagujeme na Ctrl+C/X/V/Z/Y/S/wheel.
+//   MOD_LABEL   = jak modifikátor pojmenovat v UI (titles, tahák zkratek).
+//   DEL_KEY(e)  = true pro klávesu „smaž aktuální výběr". Na MacBooku fyzická „delete" posílá
+//                Backspace, ne Delete — bez tohoto by šipky mazání vůbec nefungovaly.
+const IS_MAC = !!(window.forge && window.forge.platform === 'darwin');
+const MOD = e => IS_MAC ? e.metaKey : e.ctrlKey;
+const MOD_LABEL = IS_MAC ? '⌘' : 'Ctrl';
+const DEL_KEY = e => e.code === 'Delete' || (IS_MAC && e.code === 'Backspace');
+// Přepíše všechny "Ctrl+…" / "Ctrl" v title atributech (tooltipy) i v hláškách tak, aby na Macu
+// místo Ctrl bylo ⌘. Ušetří to duplicitní psaní každého textu.
+function localizeShortcuts(root){
+  if(!IS_MAC) return;
+  const walk = el => {
+    if(el.nodeType === 3){ if(el.data.includes('Ctrl')) el.data = el.data.replace(/Ctrl/g, '⌘'); return; }
+    if(!el.getAttribute) return;
+    const t = el.getAttribute('title'); if(t && t.includes('Ctrl')) el.setAttribute('title', t.replace(/Ctrl/g, '⌘'));
+    for(const c of el.childNodes) walk(c);
+  };
+  walk(root || document.body);
+}
+
 function getResolution(){
   const v = getSongVal('Resolution');
   const n = parseInt(v, 10);
@@ -5602,8 +5626,8 @@ cv.addEventListener('wheel', e => {
     invalidate(); draw();
     return;
   }
-  if(e.ctrlKey){
-    setScale(state.scale * (e.deltaY > 0 ? 0.9 : 1.11));   // scale ovlivní 2D i 3D
+  if(MOD(e)){
+    setScale(state.scale * (e.deltaY > 0 ? 0.9 : 1.11));   // scale ovlivní 2D i 3D (Ctrl / ⌘)
   } else {
     // posun VŽDY po snap gridu (o 1 krok za notch) a zarovnaný na mřížku — nezávisle na 2D/3D
     const step = snapStep();
@@ -5925,8 +5949,8 @@ window.addEventListener('keydown', e => {
   //  W měnilo nástroj atd. — playtest se tvářil, že „nefunguje".)
   if(state.playtest){ handlePlaytestKey(e); return; }
   const k = e.key.toLowerCase();
-  if(e.ctrlKey){
-    if(window.forge && ['z','y','s'].includes(k)) return;   // řeší menu akcelerátory
+  if(MOD(e)){
+    if(window.forge && ['z','y','s'].includes(k)) return;   // řeší menu akcelerátory (Ctrl+ na Win, ⌘ na Macu)
     if(k === 'z' && !e.shiftKey){ e.preventDefault(); undo(); }
     else if(k === 'y' || (k === 'z' && e.shiftKey)){ e.preventDefault(); redo(); }
     else if(k === 'c'){ e.preventDefault(); copySelection(false); }   // kopírovat vybraný vzor
@@ -5939,7 +5963,7 @@ window.addEventListener('keydown', e => {
   if(e.code === 'End'){ jumpToEnd(); return; }
   if(e.key === '['){ jumpToFlag(-1); return; }
   if(e.key === ']'){ jumpToFlag(1); return; }
-  if(e.code === 'Delete'){ deleteSelection(); return; }                         // smazat vybraný rozsah
+  if(DEL_KEY(e)){ deleteSelection(); return; }                         // smazat vybraný rozsah (Del i Backspace na Macu)
   if(e.code === 'Escape'){ state.selection = null; updateSelInfo(); return; }   // zrušit výběr
   // Shift+↑ / ↓ = posunout VŠECHNY noty o 1 snap krok (↑ = později / dopředu, ↓ = dříve / zpět)
   if(e.shiftKey && (e.code === 'ArrowUp' || e.code === 'ArrowDown')){
@@ -8595,6 +8619,9 @@ $('mArtClear').addEventListener('click', () => {
 function showDialog(dlg, firstFieldId){
   if(window.forge && forge.focusWin) forge.focusWin();   // programový Alt+Tab: pole v dialogu ať hned chytá klávesnici
   dlg.showModal();
+  // Titles a hlášky uvnitř dialogů se dynamicky mění (Metadata podle písně, Keybinds podle bindingů),
+  // takže platformní lokalizaci pouštíme znovu na obsah dialogu — jinak by na Macu zase probleskl „Ctrl+".
+  localizeShortcuts(dlg);
   const el = firstFieldId && $(firstFieldId);
   if(el){ try { el.focus(); if(el.select) el.select(); } catch(err){} }
 }
@@ -8993,6 +9020,9 @@ function mnuOpen(i){
 function buildMenuBar(){
   const bar = $('menubar');
   if(!bar || !window.forge) return;      // v prohlížeči (bez Electronu) lištu nekreslíme
+  // Na macOS je aplikační menu v LIŠTĚ NAHOŘE OBRAZOVKY (nativně, řídí ho hlavní proces).
+  // Nechat i HTML lištu v okně by položky ZDVOJILO a matoucně — nechme okno čistě pro editor.
+  if(IS_MAC){ bar.hidden = true; return; }
   bar.hidden = false;
   bar.innerHTML = '';
   MENU_MODEL.forEach((m, i) => {
@@ -9036,6 +9066,10 @@ function refreshRecent(){
   if(window.forge && forge.recentList) forge.recentList().then(r => { _mnuRecent = r || []; }).catch(() => {});
 }
 buildMenuBar();
+// Po sestavení UI přepiš „Ctrl" na „⌘" ve všech titles/textech (jen na Macu; na Win no-op).
+// Tenhle pass běží jednou po startu — modální dialogy si to případně přepočítají samy
+// tím, že localizeShortcuts() zavoláme z showDialog() jako pojistku pro dynamicky vytvořené uzly.
+localizeShortcuts();
 
 // akce z aplikačního menu (Electron)
 if(window.forge){
