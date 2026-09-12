@@ -15,7 +15,7 @@
     "dev": "electron .",
     "dist": "electron-builder --win nsis",
     "dist:portable": "electron-builder --win portable",
-    "dist:mac": "electron-builder --mac dmg"
+    "dist:mac": "electron-builder --mac dmg --arm64 --x64"
   },
   "build": {
     "appId": "com.zipeek.chartstudio",

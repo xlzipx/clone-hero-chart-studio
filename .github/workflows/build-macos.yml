@@ -34,6 +34,9 @@ jobs:
           # Bez tohoto by se electron-builder pokusil najít Apple Developer certifikát
           # (identity: null v package.json ho už zakazuje, ale env je jistota pro CI).
           CSC_IDENTITY_AUTO_DISCOVERY: false
+        # Oba archy definuje samo `npm run dist:mac` v package.json (--arm64 --x64),
+        # protože při zadání targetu i z CLI electron-builder pole `arch` z configu
+        # ignoruje a sestavil by jen nativní architekturu runneru.
         run: npm run dist:mac -- --publish never
 
       - name: Upload .dmg files as workflow artifact
