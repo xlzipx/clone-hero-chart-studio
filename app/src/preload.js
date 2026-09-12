@@ -31,8 +31,12 @@ contextBridge.exposeInMainWorld('forge', {
   saveArt:     (dir, name, data)      => ipcRenderer.invoke('art:save', dir, name, data),
   // samostatné audio
   openAudio:   () => ipcRenderer.invoke('audio:openDialog'),
+  // background video z disku — vlastní soubor, ne přes yt-dlp
+  openVideo:   () => ipcRenderer.invoke('video:openDialog'),
   // YouTube/URL audio (yt-dlp)
   ytEnsure:     ()        => ipcRenderer.invoke('yt:ensure'),
+  ytStatus:     ()        => ipcRenderer.invoke('yt:status'),      // verze, věk, cesta — status řádek v UI
+  ytUpdate:     ()        => ipcRenderer.invoke('yt:update'),      // „Fix / Update yt-dlp" tlačítko
   ytDownload:   (url, kind) => ipcRenderer.invoke('yt:download', url, kind),   // kind: 'audio' (výchozí) | 'video'
   // mezipaměť stažených médií (userData/yt) — ruční úklid, protože na soubory odkazují starší projekty
   ytCacheInfo:  ()          => ipcRenderer.invoke('yt:cacheInfo'),

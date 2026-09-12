@@ -1,7 +1,7 @@
 {
   "name": "chartstudio",
   "productName": "ChartStudio",
-  "version": "0.102.0",
+  "version": "0.103.0",
   "description": "Clone Hero chart editor with its own engine (drums + 5-fret guitar/bass)",
   "main": "src/main.js",
   "author": "ZIPEEK",

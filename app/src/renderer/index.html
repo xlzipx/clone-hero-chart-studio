@@ -831,6 +831,26 @@
       <button id="mArtClear" style="width:150px;">Remove</button>
     </div>
   </div>
+  <!-- Background video: název, offset slider a přesné pole v ms; „Load…" / „Detach" pro rychlé nasazení
+       vlastního videa z disku. Sync je live — slider posouvá video pozadí okamžitě, takže se dá doladit
+       uchem/okem během přehrávání skladby, ještě než uživatel klikne Save. -->
+  <div class="fieldset" id="mVideoBox" style="margin-top:14px;">
+    <label>Background video</label>
+    <div class="hint" style="margin-bottom:6px;">Video plays silently behind the 3D highway. Use the offset to line up an action (a beat drop, a vocal cue) with the same moment in the song.</div>
+    <div class="row" style="gap:6px; align-items:center; flex-wrap:wrap;">
+      <span id="mVideoName" style="flex:1 1 220px; min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; font-size:12px; color:var(--accent2);">— no video —</span>
+      <button id="mVideoLoad" class="btn-sm" title="Pick a .mp4 / .webm / .mov / .avi from your computer">Load…</button>
+      <button id="mVideoClear" class="btn-sm" title="Remove the background video from this project (the file on disk stays)">Detach</button>
+    </div>
+    <div class="row" style="gap:8px; align-items:center; margin-top:8px;">
+      <label style="font-size:12px; color:var(--dim); min-width:88px;" title="video_start_time in the song.ini — positive = the video is trimmed at the start, negative = the video is delayed">Offset (ms)</label>
+      <input type="range" id="mVideoOffRng" min="-30000" max="30000" step="10" value="0" style="flex:1;">
+      <input type="number" id="mVideoOff" step="10" value="0" style="width:96px;">
+      <button id="mVideoSyncHere" class="btn-sm" title="Set the offset so THIS moment of the video plays at the current playhead position. Move the playhead to where a video cue should hit in the song, put the video preview to that cue, and press this.">Sync at playhead</button>
+      <button id="mVideoOffZero" class="btn-sm" title="Reset offset back to 0 ms">0</button>
+    </div>
+    <div class="hint" style="margin-top:4px;"><b>+</b> ms trims the start of the video · <b>−</b> ms delays it (freezes on the first frame until the song catches up). Shortcuts during playback: <kbd>.</kbd> / <kbd>,</kbd> nudge by 100 ms.</div>
+  </div>
   <div class="fieldset" style="margin-top:14px;">
     <label>Difficulty rating — the number in the circle next to each instrument in the song list</label>
     <div class="hint" style="margin-bottom:2px;">How hard the chart is to play: <b>0</b> = easiest … <b>6</b> = hardest. Only affects the listing, not the notes.</div>
@@ -1007,6 +1027,7 @@
   <h2>Audio</h2>
   <div style="font-size:12px; color:var(--dim); margin-bottom:12px; line-height:1.5; max-width:520px;">
     Load one or more audio layers. Every un‑muted stem plays together; use <b>🔊 / 🔇</b> to switch what you hear. Pick which stem drives the <b>highway waveform</b> from the toolbar (top bar).
+    <br><span class="dim2">The last row, <b>Video audio</b>, pulls the sound track out of the loaded background video — useful when you want to chart from the video's own audio, or mix it against a separate Song stem.</span>
   </div>
   <div id="audioList" style="display:flex; flex-direction:column; gap:6px; max-height:46vh; overflow-y:auto;"></div>
   <div style="margin-top:14px; padding-top:12px; border-top:1px solid var(--border);">
@@ -1030,7 +1051,8 @@
       </select>
     </div>
   </div>
-  <div class="btns">
+  <div class="btns" style="align-items:center;">
+    <span id="audioStatus" style="margin-right:auto; color:var(--dim); font-size:12px;"></span>
     <button id="audioClose" class="primary">Close</button>
   </div>
 </dialog>
@@ -1104,8 +1126,15 @@
     <button id="ytVidClear" class="btn-sm" title="Remove the background video from this project — the downloaded file stays on disk">✕ Detach</button>
     <button id="ytVidDel" class="btn-sm danger" title="Delete the downloaded video file from disk and drop it from the project">🗑 Delete file</button>
   </div>
-  <!-- Stažené soubory se nemažou samy: starší projekty na ně odkazují. Úklid je proto ruční. -->
+  <!-- yt-dlp status + Fix tlačítko. YouTube/SoundCloud občas změní extraction protokol a starý
+       yt-dlp přestane fungovat („Signature extraction failed", „No supported JS runtime", …).
+       Řešením je vždy stáhnout nejnovější binárku — toto tlačítko to udělá jedním klikem. -->
   <div class="hint" style="display:flex; align-items:center; gap:8px; margin-top:12px; padding-top:10px; border-top:1px solid var(--border);">
+    <span id="ytDlpStatus" style="margin-right:auto;">yt-dlp: checking…</span>
+    <button id="ytDlpUpdate" class="btn-sm" title="Reinstall yt-dlp with the latest release from GitHub. Use this when downloads suddenly stop working — YouTube changes their extraction protocol every few months and old yt-dlp breaks with it.">🔧 Fix / Update</button>
+  </div>
+  <!-- Stažené soubory se nemažou samy: starší projekty na ně odkazují. Úklid je proto ruční. -->
+  <div class="hint" style="display:flex; align-items:center; gap:8px; margin-top:8px;">
     <span id="ytCacheInfo" style="margin-right:auto;">Downloaded media cache: …</span>
     <button id="ytCacheClear" class="btn-sm danger" title="Delete downloaded audio/video files. The file used by the open project is kept — but other saved charts will lose their link to their audio.">Clear cache</button>
   </div>
@@ -3720,10 +3749,20 @@ function bgVideoSeeked(el){
   invalidate();
 }
 // srovnat video s playheadem: za jízdy hraje, jinak stojí na snímku pod kurzorem
+// Časový offset videa proti skladbě, ve VTEŘINÁCH.
+//   +offset  = video je „napřed" a při přehrávání se z něj přeskočí prvních N sekund
+//              (song čas 0 = video čas offset). Užitečné, když má video na začátku intro/loga.
+//   -offset  = video „čeká" — song čas |offset| = video čas 0 (statický první snímek do té doby).
+// Uloženo je v song.ini pod klíčem `video_start_time` v milisekundách, přesně jak to čte Clone Hero.
+function videoOffsetSec(){
+  const ms = parseFloat(state.songIni && state.songIni.video_start_time);
+  return Number.isFinite(ms) ? ms / 1000 : 0;
+}
 function syncBgVideo(el){
   if(!el || !el.duration || !isFinite(el.duration)) return;
   const b = _bgVid;
-  const want = Math.max(0, Math.min(el.duration - 0.05, tickToTime(state.scrollTick)));
+  // Kladný video_start_time posune video dopředu (přeskočí kus), záporný ho drží na 0 kým skladba dojde.
+  const want = Math.max(0, Math.min(el.duration - 0.05, tickToTime(state.scrollTick) + videoOffsetSec()));
   const now = performance.now();
   if(state.playing){
     if(b){ b.want = null; b.seekAt = 0; b.wasPlaying = true; }
@@ -5788,6 +5827,11 @@ const HELP_CONTENT = [
     {keys:'<kbd>Shift</kbd>+<kbd>↑</kbd><kbd>↓</kbd>', desc:'Shift all notes ± 1 step'},
     {keys:'<kbd>+</kbd><kbd>−</kbd>', desc:'Note scale · <kbd>Ctrl</kbd>+wheel too'},
   ]},
+  {title:'Background video', rows:[
+    {keys:'<kbd>Ctrl+Shift+V</kbd>', desc:'Load background video from a file'},
+    {keys:'<kbd>,</kbd><kbd>.</kbd>', desc:'Nudge video offset ± 100 ms <span class="dim2">(with <kbd>Shift</kbd> = ± 10 ms)</span>'},
+    {keys:'drag drop', desc:'Drop any <b>.mp4 / .webm / .mov / .avi</b> on the window'},
+  ]},
 ];
 const KB_LABEL = Object.fromEntries(KEYBIND_DEFS.map(d => [d.id, d.label]));
 let _kbCapturing = null;
@@ -5982,6 +6026,16 @@ window.addEventListener('keydown', e => {
   }
   if(e.key === '+' || e.key === '='){ setScale(state.scale * 1.15); return; }
   if(e.key === '-'){ setScale(state.scale * 0.87); return; }
+  // Nudge video offsetu za přehrávání: „,"/„." = ±100 ms (Shift = ±10 ms, jemnější).
+  // Funguje jen když je pozadí video — bez toho nemá nic vliv a klávesy se pouštějí dál na keybindy.
+  if((e.key === '.' || e.key === ',') && state.bgVideo){
+    const dir = e.key === '.' ? 1 : -1;
+    const step = e.shiftKey ? 10 : 100;
+    const cur = parseFloat(state.songIni.video_start_time) || 0;
+    setVideoOffsetMs(cur + dir * step);
+    e.preventDefault();
+    return;
+  }
   // konfigurovatelné akce (keybindy) — token: ' ' pro mezerník, jinak malé písmeno
   const tok = e.code === 'Space' ? ' ' : k;
   for(const id in keybinds){
@@ -6055,6 +6109,10 @@ const AUDIO_ROLES = [
   {role:'rhythm',  label:'Rhythm'},  {role:'keys',   label:'Keys'},   {role:'drums',  label:'Drums'},
   {role:'drums_2', label:'Drums 2'}, {role:'drums_3', label:'Drums 3'}, {role:'drums_4', label:'Drums 4'},
   {role:'vocals',  label:'Vocals'},  {role:'crowd',  label:'Crowd'},
+  // Zvuk z nahraného background videa. Speciální stem: nenačítá se ze souboru, ale
+  // dekóduje se z `state.bgVideo.data` (viz loadVideoAudioStem). Chová se pak jako každý
+  // jiný stem — vlastní volume/mute, mixuje se do exportu song.wav, dá se odpojit křížkem.
+  {role:'video',   label:'Video audio', fromVideo: true},
 ];
 const AUDIO_ROLE_LABEL = Object.fromEntries(AUDIO_ROLES.map(r => [r.role, r.label]));
 function roleFromName(name){
@@ -7013,6 +7071,21 @@ async function openAudioAction(){
     $('fileAudio').click();
   }
 }
+
+// „File → Load background video…" a Ctrl+Shift+V — vlastní video z disku jako pozadí za
+// highwayí (obdoba stažení z YouTube, jen bez yt-dlp). Cesta se schovává do setBgVideo()
+// stejně jako u yt-dlp, takže se sync i export chovají identicky.
+async function openBgVideoAction(){
+  if(!window.forge || !forge.openVideo) return;      // v prohlížeči zatím ne — chce to <input type="file"> fallback
+  const r = await forge.openVideo();
+  if(!r) return;                                     // dialog zrušen
+  if(r.error){ alert(r.error); return; }
+  // Uložit video buffer + jméno + cestu (ta se hodí, kdyby uživatel chtěl soubor později
+  // „odpojit i smazat" — u vlastního videa mimo cache to nechceme umožnit, drží se jen původní cesta).
+  setBgVideo(r.data, r.name, r.path);
+  if(state.bg3d !== 'video') setBg3d('video');       // ať uživatel VIDÍ, že video sedlo — přepnout pozadí
+  invalidate();
+}
 async function saveChartAction(saveAs){
   if(!state.chart) return false;
   let content;
@@ -7302,8 +7375,9 @@ async function chooseAlbumArt(file){
 }
 
 // ---------- Mix audia + WAV (export s 2s lead-inem) ----------
-function buildMixWav(leadSec){
-  let stems = state.audio.stems.filter(s => !s.muted);   // ztlumené stemy se do exportu nemixují
+// `stemsIn` = volitelný seznam stemů k namixování; jinak se berou všechny nemuted z projektu.
+function buildMixWav(leadSec, stemsIn){
+  let stems = stemsIn || state.audio.stems.filter(s => !s.muted);
   if(!stems.length) stems = state.audio.stems;           // (vše ztlumené → přesto exportovat vše)
   const sr = stems[0].buffer.sampleRate;
   let maxLen = 0; for(const s of stems) maxLen = Math.max(maxLen, s.buffer.length);
@@ -7360,6 +7434,42 @@ async function buildExportAudio(lead){
   let stems = state.audio.stems.filter(s => !s.muted);
   if(!stems.length) stems = state.audio.stems;
   if(!stems.length) return [];
+  // „Video audio" (role 'video') není CH-kompatibilní stem name — hra by soubor `video.wav`
+  // ignorovala. Přeznačíme ho tedy na 'song', aby se audio z videa do hry dostalo. Pokud už
+  // 'song' existuje, do finálního souboru sáhne mix (buildMixWav sčítá všechny nemuted stemy),
+  // a video se do exportu nezapisuje samostatně — ať se v `song.wav` neduplikuje.
+  const hasRealSong = stems.some(s => s.role === 'song');
+  if(!hasRealSong){
+    stems = stems.map(s => s.role === 'video' ? {...s, role: 'song'} : s);
+  } else {
+    // Song i Video najednou → sloučit do jednoho song.wav, ať se zvuk videa dostane do mixu
+    // a Clone Hero ho přehraje. Zachováme ostatní instrumentální stemy zvlášť (guitar/bass/…),
+    // jen song mix bude obsahovat i video.
+    const videoStems = stems.filter(s => s.role === 'video');
+    if(videoStems.length){
+      const others = stems.filter(s => s.role !== 'video' && s.role !== 'song');
+      // Vlastní ruční mix Song + Video → jeden song.wav; ostatní stopy zvlášť jak dřív.
+      const songMix = buildMixWav(lead, stems.filter(s => s.role === 'song' || s.role === 'video'));
+      // Note: buildMixWav bere `state.audio.stems.filter(nemute)` sama, takže pro tuhle větev
+      // použijeme lokální mix — zapíšeme rovnou. Ostatní stemy proženeme běžnou cestou dole.
+      const out = [{name: 'song.wav', data: songMix}];
+      // Zbytek stemů jde cestou "each as its own file"; base je s.role
+      const used = new Set(['song']);
+      for(const s of others){
+        let base = s.role || 'song';
+        while(used.has(base)) base += '_x';
+        used.add(base);
+        const vol = s.volume == null ? 1 : s.volume;
+        const ext = (String(s.name || '').match(/\.([a-z0-9]+)$/i) || [])[1];
+        if(lead <= 0.0005 && vol === 1 && ext){
+          const raw = s.bytes && s.bytes.length ? s.bytes : await readFileBytes(s.path);
+          if(raw){ out.push({name: base + '.' + ext.toLowerCase(), data: raw}); continue; }
+        }
+        out.push({name: base + '.wav', data: stemWav(s.buffer, lead, vol)});
+      }
+      return out;
+    }
+  }
   if(stems.length === 1) return [{name: 'song.wav', data: buildMixWav(lead)}];   // jedna stopa = beze změny
   stems = stems.slice().sort((a, b) => (a.role === 'song' ? -1 : 0) - (b.role === 'song' ? -1 : 0));
   const out = [], used = new Set();
@@ -7872,8 +7982,11 @@ $('volIcon').addEventListener('click', () => {
 function renderAudioList(){
   const list = $('audioList'); if(!list) return;
   list.innerHTML = '';
-  for(const {role, label} of AUDIO_ROLES){
+  for(const meta of AUDIO_ROLES){
+    const role = meta.role, label = meta.label;
     const s = state.audio ? state.audio.stems.find(x => x.role === role) : null;
+    // „Video audio" řádek se řídí přítomností background videa: bez videa není co načíst.
+    const noVideo = meta.fromVideo && !(state.bgVideo && state.bgVideo.data);
     const row = document.createElement('div');
     row.style.cssText = 'display:flex; align-items:center; gap:8px; padding:5px 7px; border:1px solid var(--border); border-radius:8px; background:rgba(255,255,255,0.02);';
     const lab = document.createElement('span'); lab.textContent = label;
@@ -7881,6 +7994,7 @@ function renderAudioList(){
     const nm = document.createElement('span');
     nm.style.cssText = 'flex:1; min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; font-size:12px;';
     if(s){ nm.textContent = s.name.replace(/\.[^.]+$/, ''); nm.style.color = 'var(--text)'; nm.title = s.name; }
+    else if(noVideo){ nm.textContent = 'No background video loaded'; nm.style.color = 'var(--dim)'; }
     else { nm.textContent = 'No audio'; nm.style.color = 'var(--danger)'; }
     const mkBtn = (txt, cls) => { const b = document.createElement('button'); b.className = 'btn-sm' + (cls ? ' ' + cls : ''); b.style.flex = '0 0 auto'; b.textContent = txt; return b; };
     const mute = mkBtn(s && !s.muted ? '🔊' : '🔇'); mute.disabled = !s; mute.title = 'Play / mute this stem';
@@ -7897,7 +8011,11 @@ function renderAudioList(){
       if(state.playing && state.play && state.play.stemGains && state.play.stemGains[role]) state.play.stemGains[role].gain.value = s.volume;
     });
     vol.addEventListener('change', e => e.target.blur());
-    const load = mkBtn('Load'); load.addEventListener('click', () => loadStemForRole(role));
+    const load = mkBtn('Load');
+    load.disabled = noVideo;
+    if(noVideo) load.title = 'Load a background video first (File → Load background video…) — the audio track is taken from it.';
+    else if(meta.fromVideo) load.title = 'Extract the audio track from the loaded background video';
+    load.addEventListener('click', () => meta.fromVideo ? loadVideoAudioStem() : loadStemForRole(role));
     const del = mkBtn('✕', 'danger'); del.disabled = !s; del.addEventListener('click', () => { removeStemRole(role); renderAudioList(); });
     row.append(lab, nm, vol, mute, load, del);
     list.appendChild(row);
@@ -7914,6 +8032,33 @@ async function loadStemForRole(role){
     if(role === 'song') setAudioSource(r.path, r.name);
     renderAudioList();
   } else { _pendingStemRole = role; $('fileAudio').click(); }
+}
+// Extrahovat audio stopu z nahraného background videa a přidat ji jako stem „video".
+// Klíčové: video pozadí zůstává, jen jeho zvuk se přidá do mixu — takže lze mít:
+//   (a) separátní Song stem + video jen pro obraz (video muted = výchozí)
+//   (b) žádné Song, jen audio z videa (nahraj video, klikni Load u „Video audio")
+//   (c) obojí najednou pod různou hlasitostí (uživatel si namíchá)
+// decodeAudioData zvládne mp4/webm/mov z Chromia (Electron) bez konverze — sáhneme rovnou
+// do `state.bgVideo.data` a předáme kopii bufferu, protože decode ho zkonzumuje.
+async function loadVideoAudioStem(){
+  const v = state.bgVideo;
+  if(!v || !v.data){ alert('Load a background video first (File → Load background video…).'); return; }
+  const setS = msg => { const el = $('audioStatus'); if(el) el.textContent = msg || ''; };
+  setS('Decoding audio from video…');
+  try {
+    // Kopie: decodeAudioData vezme ownership přes transfer — bez slice() by se `state.bgVideo.data`
+    // po dekódu stal detached ArrayBuffer a video pozadí by pak nešlo znovu vytvořit (Blob).
+    const copy = v.data.slice().buffer;
+    const stem = await decodeToStem(copy, v.name || 'video.mp4');
+    if(!stem){ setS(''); alert('Could not decode audio from this video. Some containers (fragmented DASH) have no readable audio stream — try a different file, or export the audio separately.'); return; }
+    setStemBuffer('video', stem.buffer, (v.name || 'video.mp4') + ' (audio)', {});
+    setS('Video audio loaded ✓');
+    setTimeout(() => setS(''), 1500);
+    renderAudioList();
+  } catch(err){
+    setS('');
+    alert('Could not decode audio from this video: ' + (err && err.message || err));
+  }
 }
 if($('audioClose')) $('audioClose').addEventListener('click', () => $('audioDlg').close());
 // nastavení pomůcek (metronom + clapy)
@@ -8470,7 +8615,55 @@ $('btnYt').addEventListener('click', () => {
   if(!window.forge){ alert('Downloading from a URL works in the desktop app.'); return; }
   $('ytStatus').textContent = '';
   refreshYtCache();
+  refreshYtDlpStatus();                     // stav yt-dlp: verze + věk + (v PATH / vlastní)
   showDialog($('ytDlg'), 'ytQ');
+});
+// Status yt-dlp binárky v dialogu: „yt-dlp 2026.09.05 · fresh" / „… · 179 days old — Update".
+// Slouží uživateli jako jasný signál, kdy sáhnout po Fix tlačítku. Volá se při otevření
+// dialogu a po každém stisknutí Fix.
+async function refreshYtDlpStatus(){
+  const el = $('ytDlpStatus'), btn = $('ytDlpUpdate');
+  if(!el || !window.forge || !forge.ytStatus){ el && (el.textContent = ''); return; }
+  el.textContent = 'yt-dlp: checking…';
+  btn.disabled = true;
+  let s;
+  try { s = await forge.ytStatus(); } catch(err){ el.textContent = 'yt-dlp: not available'; return; }
+  if(!s || !s.installed){
+    el.textContent = 'yt-dlp: not installed';
+    el.style.color = 'var(--accent2)';
+    btn.disabled = false;
+    btn.textContent = '⬇ Install';
+    return;
+  }
+  const parts = ['yt-dlp'];
+  if(s.version) parts.push(s.version);
+  if(Number.isFinite(s.ageDays)){
+    parts.push(s.ageDays === 0 ? 'today' : s.ageDays === 1 ? 'yesterday' : s.ageDays + ' days old');
+  }
+  if(!s.inUserData) parts.push('from PATH');
+  el.textContent = parts.join(' · ');
+  // Rizikově staré = 90+ dní. YouTube extraction se obvykle láme dřív, ale některé útoky
+  // dorazí až po půl roce. Do 90 dní se drží zeleně, potom žlutě.
+  const stale = Number.isFinite(s.ageDays) && s.ageDays > 90;
+  el.style.color = stale ? 'var(--warn, #f5c518)' : 'var(--accent2)';
+  btn.disabled = false;
+  btn.textContent = stale ? '🔧 Update (recommended)' : '🔧 Fix / Update';
+}
+$('ytDlpUpdate').addEventListener('click', async () => {
+  const btn = $('ytDlpUpdate'), st = $('ytStatus');
+  btn.disabled = true;
+  const before = btn.textContent;
+  btn.textContent = 'Downloading…';
+  st.textContent = 'Downloading the latest yt-dlp from GitHub…';
+  const r = await forge.ytUpdate();
+  if(r && r.error){
+    st.textContent = 'Update failed: ' + r.error;
+    btn.textContent = before;
+    btn.disabled = false;
+    return;
+  }
+  st.textContent = 'yt-dlp updated to ' + (r.version || 'the latest release') + '. Try the download again.';
+  await refreshYtDlpStatus();
 });
 // Mezipaměť stažených médií: soubory se nemažou samy, protože na ně odkazují starší projekty
 // (DFAudioPath). Tohle je ruční úklid — soubor právě otevřeného projektu se vynechá.
@@ -8507,6 +8700,13 @@ $('ytCacheClear').addEventListener('click', async () => {
 function setBgVideo(data, name, path){
   state.bgVideo = data ? {data, name: name || 'video.mp4', path: path || null} : null;
   releaseBgVideo();                    // staré video na pozadí zahodit (jiná písnička / odebráno)
+  // Když se video mění nebo mizí, „Video audio" stem už neplatí (patřil starému videu).
+  // Uživatel ho případně natáhne znovu z nového; automaticky to neděláme, ať do mixu
+  // netaháme překryté audio bez ptaní.
+  if(state.audio && state.audio.stems.some(x => x.role === 'video')){
+    removeStemRole('video');
+    if($('audioDlg') && $('audioDlg').open) renderAudioList();
+  }
   // stejně jako u audia (DFAudioPath): zapamatovat cestu, ať video najde i holý .chart
   if(state.chart) setSongVal('DFVideoPath', (data && path) ? path : '', true);
   refreshYtMedia();
@@ -8567,6 +8767,30 @@ for(const b of $('ytKind').querySelectorAll('[data-kind]')){
     b.blur();
   });
 }
+// Typické zprávy, které znamenají „yt-dlp je zastaralý": YouTube změnil extraction protokol,
+// staré verze se dusí signature/nsig, novější warnují na chybějící JS runtime. Když ji uvidíme,
+// v UI to pojmenujeme (odlišíme od skutečně nefunkčního odkazu) a nabídneme rovnou Fix.
+function ytErrorLooksStale(msg){
+  if(!msg) return false;
+  const m = msg.toLowerCase();
+  return m.includes('signature extraction')
+      || m.includes('nsig extraction')
+      || m.includes('no supported javascript runtime')
+      || m.includes('unable to extract') && m.includes('youtube')
+      || m.includes('please update') || m.includes('update to the latest version');
+}
+function ytReportError(msg){
+  const setS = s => { $('ytStatus').textContent = s; };
+  if(ytErrorLooksStale(msg)){
+    setS('Download failed — this usually means yt-dlp is out of date. Click 🔧 Fix / Update below and try again.');
+    // Blikni tlačítkem, ať uživatel ví, kam kliknout.
+    const b = $('ytDlpUpdate');
+    b.style.transition = 'transform .2s'; b.style.transform = 'scale(1.08)';
+    setTimeout(() => { b.style.transform = ''; }, 400);
+  } else {
+    setS(msg);
+  }
+}
 async function ytGrab(url){
   const setS = s => { $('ytStatus').textContent = s; };
   if(!YT_URL_RE.test(url)){ setS('That does not look like a valid link (it must start with http).'); return false; }
@@ -8575,9 +8799,9 @@ async function ytGrab(url){
   btns.forEach(b => b.disabled = true);
   try {
     const ok = await forge.ytEnsure();
-    if(ok.error){ setS(ok.error); return false; }
+    if(ok.error){ ytReportError(ok.error); return false; }
     const r = await forge.ytDownload(url, 'audio');
-    if(r.error){ setS(r.error); return false; }
+    if(r.error){ ytReportError(r.error); return false; }
     const stem = await decodeToStem(u8ToArrayBuffer(r.data), r.name);
     if(!stem){ setS('Could not decode the downloaded audio.'); return false; }
     setStemBuffer('song', stem.buffer, r.name, {path: r.path || null});
@@ -8585,7 +8809,7 @@ async function ytGrab(url){
     if(!wantVideo){ setS('Loaded as the audio stem ✓'); setTimeout(() => $('ytDlg').close(), 900); return true; }
     setS('Audio ✓ — downloading the video…');
     const v = await forge.ytDownload(url, 'video');
-    if(v.error){ setS('Audio ✓ · video failed: ' + v.error); return true; }   // audio máme, video je bonus
+    if(v.error){ ytReportError('Audio ✓ · video failed: ' + v.error); return true; }   // audio máme, video je bonus
     setBgVideo(v.data, v.name, v.path || null);
     setS('Audio ✓ · background video ✓');
     setTimeout(() => $('ytDlg').close(), 1200);
@@ -8638,9 +8862,71 @@ $('btnMeta').addEventListener('click', () => {
   $('mStream').value = getSongVal('MusicStream') || '';
   const pms = parseFloat(state.songIni.preview_start_time);
   $('mPreview').value = Number.isFinite(pms) && pms >= 0 ? String(+(pms / 1000).toFixed(2)) : '';
+  refreshVideoSection();                                  // background video + offset
   renderDiffFields();
   setAlbumPreview();
   showDialog($('metaDlg'), 'mName');
+});
+// „Background video" sekce v Metadata dialogu — název souboru + offset. Slider a číselné pole
+// jsou vzájemně provázané a při každé změně živě přepisují state.songIni.video_start_time,
+// takže se `syncBgVideo` (renderovací smyčka) hned trefí správně — uživatel může Metadata
+// nechat otevřené, doladit slider za přehrávání a slyšet/vidět, jak sync sedne.
+function refreshVideoSection(){
+  const v = state.bgVideo;
+  const name = $('mVideoName');
+  if(v){
+    const mb = (v.data.length / 1048576).toFixed(1);
+    name.textContent = (v.name || 'video.mp4') + '  ·  ' + mb + ' MB';
+    name.style.color = 'var(--text)';
+  } else {
+    name.textContent = '— no video —';
+    name.style.color = 'var(--dim)';
+  }
+  $('mVideoClear').disabled = !v;
+  $('mVideoSyncHere').disabled = !v;
+  $('mVideoOffRng').disabled = !v;
+  $('mVideoOff').disabled = !v;
+  $('mVideoOffZero').disabled = !v;
+  // Aktuální offset (ms) z song.ini → oba vstupy najednou.
+  const ms = Math.round(videoOffsetSec() * 1000);
+  $('mVideoOffRng').value = clamp(ms, -30000, 30000);
+  $('mVideoOff').value = ms;
+}
+// Zapsat offset do songIni. Prázdné pole / 0 klíč zachovává (0 je platná hodnota — Clone Hero
+// ji ignoruje jen tehdy, když klíč vůbec není). Uložení do songIni je odpojené od Save dialogu:
+// když uživatel Metadata zavře přes Cancel, video_start_time se NEvrátí — což je záměr, jinak
+// by živý slider za přehrávání nedával smysl.
+function setVideoOffsetMs(ms){
+  if(!Number.isFinite(ms)) return;
+  ms = clamp(Math.round(ms), -600000, 600000);              // ±10 min pro jistotu; UI slider je jen ±30 s
+  state.songIni.video_start_time = String(ms);
+  $('mVideoOffRng').value = clamp(ms, -30000, 30000);
+  $('mVideoOff').value = ms;
+  markDirty();
+  invalidate();
+}
+$('mVideoOffRng').addEventListener('input', () => setVideoOffsetMs(parseFloat($('mVideoOffRng').value)));
+$('mVideoOff').addEventListener('input',    () => setVideoOffsetMs(parseFloat($('mVideoOff').value)));
+$('mVideoOffZero').addEventListener('click', () => setVideoOffsetMs(0));
+$('mVideoLoad').addEventListener('click', async () => {
+  await openBgVideoAction();
+  refreshVideoSection();
+});
+$('mVideoClear').addEventListener('click', () => {
+  setBgVideo(null);
+  // Vlastní pravidlo: když uživatel video úplně odpojí, offset ztrácí smysl. Necháváme ho být, ale
+  // nulujeme na 0 — kdyby později video přidal, začne od čistého stavu (a explicitní 0 nevadí).
+  setVideoOffsetMs(0);
+  refreshVideoSection();
+});
+$('mVideoSyncHere').addEventListener('click', () => {
+  // „Nastav offset tak, aby AKTUÁLNÍ snímek videa hrál v AKTUÁLNÍM čase skladby."
+  //  offset[s] = videoTime - songTime  →  songTime + offset = videoTime  (přesně sync rovnice v syncBgVideo)
+  const b = _bgVid && _bgVid.el;
+  if(!b){ alert('Play or scrub the highway once so the video preview activates, then try again.'); return; }
+  const vt = b.currentTime;
+  const st = tickToTime(state.scrollTick);
+  setVideoOffsetMs(Math.round((vt - st) * 1000));
 });
 // preview úryvku: From playhead = aktuální pozice (v čase audia), ▶ Try = 15s přehrání od preview startu
 $('mPreviewSet').addEventListener('click', () => {
@@ -8882,6 +9168,7 @@ function runMenuAction(action){
   else if(action === 'open') openSongAction();
   else if(action === 'openfolder') openSongFolderAction();
   else if(action === 'audio') openAudioAction();
+  else if(action === 'videofile') openBgVideoAction();
   else if(action === 'save') saveProjectAction(false);
   else if(action === 'saveas') saveProjectAction(true);
   else if(action === 'savechart') saveChartAction(true);
@@ -8915,6 +9202,7 @@ const MENU_MODEL = [
     {label: 'Open song folder…', acc: 'Ctrl+Shift+O', action: 'openfolder'},
     {label: 'Open recent', recent: true},
     {label: 'Load audio…', acc: 'Ctrl+L', action: 'audio'},
+    {label: 'Load background video…', acc: 'Ctrl+Shift+V', action: 'videofile'},
     {sep: true},
     {label: 'Save project', acc: 'Ctrl+S', action: 'save'},
     {label: 'Save project As…', acc: 'Ctrl+Shift+S', action: 'saveas'},
@@ -9092,6 +9380,17 @@ window.addEventListener('drop', async e => {
       if(p){ await loadSongPayload(await forge.loadSongPath(p)); continue; }
     }
     if(/\.(ogg|opus|mp3|wav|flac|m4a)$/i.test(f.name) || f.type.startsWith('audio/')){ await loadAudioFile(f); continue; }
+    // Background video přetažením: video/* MIME OR jedna z přípon, které bere i main.js (VIDEO_EXTS).
+    // Buffer čteme přímo z File — Electronové IPC by tady nic nepřidalo (nepotřebujeme cestu k .path).
+    if(/\.(mp4|webm|mov|avi|mpe?g|mkv)$/i.test(f.name) || f.type.startsWith('video/')){
+      try {
+        const data = new Uint8Array(await f.arrayBuffer());
+        const path = window.forge && forge.pathForFile ? forge.pathForFile(f) : null;
+        setBgVideo(data, f.name, path);
+        if(state.bg3d !== 'video') setBg3d('video');
+      } catch(err){ alert('Could not load video: ' + err.message); }
+      continue;
+    }
     if(window.forge){                                             // složka písničky / ostatní přes hostitele
       const p = forge.pathForFile(f);
       if(p){ await loadSongPayload(await forge.loadSongPath(p)); continue; }

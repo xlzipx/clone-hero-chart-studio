@@ -518,39 +518,76 @@ function findYtDlp(){
   }
   return null;
 }
+// Stáhnout nejnovější yt-dlp z GitHub releases do userData/tools. Používá se z „ensure"
+// (příprava před prvním stahováním), z „update" (uživatelské Fix tlačítko) i po prvním
+// selhání kvůli staré verzi. Zápis přes .tmp + rename: useknutý soubor (došlo místo, zabitá
+// appka) by jinak zůstal a findYtDlp() by na něj navěky ukazoval — a nešlo by to opravit.
+async function downloadYtDlp(){
+  const dir = path.join(app.getPath('userData'), 'tools');
+  await fs.mkdir(dir, {recursive: true});
+  const r = await fetch('https://github.com/yt-dlp/yt-dlp/releases/latest/download/' + YTDLP_BIN, {redirect: 'follow'});
+  if(!r.ok) return {error: 'Download failed: HTTP ' + r.status};
+  const dest = path.join(dir, YTDLP_BIN);
+  const buf = Buffer.from(await r.arrayBuffer());
+  if(buf.length < 1024 * 1024) return {error: 'Download failed: incomplete file (' + buf.length + ' B)'};
+  const tmp = dest + '.tmp';
+  try {
+    await fs.writeFile(tmp, buf);
+    await fs.rename(tmp, dest);
+    // Na Unixech je stažený soubor obyčejný „regular file" bez `x` bitu — bez chmodu by
+    // spawn skončil `EACCES: permission denied`. Windows práva neřeší, tohle je no-op.
+    if(IS_MAC){ try { await fs.chmod(dest, 0o755); } catch(e){} }
+  } catch(err){ try { await fs.unlink(tmp); } catch(e){} return {error: 'Download failed: ' + err.message}; }
+  return {path: dest, downloaded: true};
+}
+// Verze yt-dlp binárky (formát yy.mm.dd nebo yy.mm.dd.N pro nightly). Používá se v UI status
+// řádku a k výpočtu věku — hlavně jestli je verze rizikově stará (YouTube pravidelně mění
+// signature extraction a stará yt-dlp přestane zvládat některá videa).
+async function ytDlpVersion(exe){
+  return new Promise(resolve => {
+    let out = '';
+    const p = spawn(exe, ['--version'], {windowsHide: true});
+    const timer = setTimeout(() => { try { p.kill(); } catch(e){} resolve(null); }, 4000);
+    p.stdout.on('data', d => { out += d.toString(); });
+    p.on('close', () => { clearTimeout(timer); const m = out.trim().match(/^\d{4}\.\d{2}\.\d{2}(\.\d+)?$/); resolve(m ? out.trim() : null); });
+    p.on('error', () => { clearTimeout(timer); resolve(null); });
+  });
+}
+function daysSinceVersion(v){
+  if(!v) return null;
+  const m = v.match(/^(\d{4})\.(\d{2})\.(\d{2})/);
+  if(!m) return null;
+  const t = Date.UTC(+m[1], +m[2] - 1, +m[3]);
+  return Math.max(0, Math.round((Date.now() - t) / 86400000));
+}
+// UI status řádek v dialogu Import from URL („yt-dlp 2026.03.17 · 179 days old · in PATH").
+ipcMain.handle('yt:status', async () => {
+  const p = findYtDlp();
+  if(!p) return {installed: false};
+  const version = await ytDlpVersion(p);
+  const userDir = path.join(app.getPath('userData'), 'tools');
+  return {installed: true, path: p, version, ageDays: daysSinceVersion(version), inUserData: p.toLowerCase().startsWith(userDir.toLowerCase())};
+});
+// „Fix / Update yt-dlp" — vždy přepíše kopií z GitHub releases. findYtDlp() userData verzi
+// preferuje před PATH, takže po tomto se používá naše bez ohledu na to, co má uživatel v PATH
+// (řeší i „mám yt-dlp v C:\bin, ale nemám právo přepsat" scénář).
+ipcMain.handle('yt:update', async () => {
+  const r = await downloadYtDlp();
+  if(r.error) return r;
+  const version = await ytDlpVersion(r.path);
+  return {...r, version, ageDays: daysSinceVersion(version)};
+});
 ipcMain.handle('yt:ensure', async () => {
   const found = findYtDlp();
   if(found) return {path: found};
-  if(!SMOKE){
-    const c = dialog.showMessageBoxSync(win, {
-      type: 'question', buttons: ['Download yt-dlp', 'Cancel'], defaultId: 0, cancelId: 1,
-      message: 'yt-dlp is required',
-      detail: YTDLP_BIN + ' was not found on this computer. Download the official build from the yt-dlp GitHub releases into the app data folder?',
-    });
-    if(c === 1) return {error: 'yt-dlp not available'};
-  } else return {error: 'yt-dlp not found (smoke: no download)'};
-  try {
-    const dir = path.join(app.getPath('userData'), 'tools');
-    await fs.mkdir(dir, {recursive: true});
-    const r = await fetch('https://github.com/yt-dlp/yt-dlp/releases/latest/download/' + YTDLP_BIN, {redirect: 'follow'});
-    if(!r.ok) return {error: 'Download failed: HTTP ' + r.status};
-    const dest = path.join(dir, YTDLP_BIN);
-    // Zápis přes .tmp + rename: useknutý soubor (došlo místo, zabitá appka) se dřív tvářil jako
-    // hotová instalace — findYtDlp() ho pak vracel navždy, stahování padalo a v UI nebylo jak to
-    // spravit. Malý soubor navíc rovnou odmítneme, ať nezůstane vadná kopie.
-    const buf = Buffer.from(await r.arrayBuffer());
-    if(buf.length < 1024 * 1024) return {error: 'Download failed: incomplete file (' + buf.length + ' B)'};
-    const tmp = dest + '.tmp';
-    try {
-      await fs.writeFile(tmp, buf);
-      await fs.rename(tmp, dest);
-      // Na Unixech je stažený soubor obyčejný „regular file" bez `x` bitu — bez chmodu by
-      // spawn skončil `EACCES: permission denied`. Windows práva neřeší, tohle je no-op.
-      if(!IS_MAC) { /* windows: přípona .exe stačí */ }
-      else { try { await fs.chmod(dest, 0o755); } catch(e){} }
-    } catch(err){ try { await fs.unlink(tmp); } catch(e){} throw err; }
-    return {path: dest, downloaded: true};
-  } catch(err){ return {error: 'Download failed: ' + err.message}; }
+  if(SMOKE) return {error: 'yt-dlp not found (smoke: no download)'};
+  const c = dialog.showMessageBoxSync(win, {
+    type: 'question', buttons: ['Download yt-dlp', 'Cancel'], defaultId: 0, cancelId: 1,
+    message: 'yt-dlp is required',
+    detail: YTDLP_BIN + ' was not found on this computer. Download the official build from the yt-dlp GitHub releases into the app data folder?',
+  });
+  if(c === 1) return {error: 'yt-dlp not available'};
+  return await downloadYtDlp();
 });
 // Mezipaměť stažených médií (userData/yt). Soubory se ZÁMĚRNĚ nemažou samy — starší projekty
 // na ně odkazují přes DFAudioPath. Úklid je proto ruční, přes tlačítko v dialogu stahování.
@@ -682,6 +719,11 @@ ipcMain.handle('yt:download', async (e, videoUrl, kind) => {
       'bestvideo[ext=mp4][height<=1080]',                 // 1080p mp4 jiným kodekem
     ] : []).concat(progressive).join('/');
     const args = ['--no-playlist',
+      // --no-update potlačí „update available"/„YouTube extraction may fail" warning,
+      // který yt-dlp odesílá do stderr. Neovlivňuje samotnou binárku (updatuje se ručně přes
+      // Fix tlačítko v UI). Bez tohoto flagu se warning promíchává se skutečnými chybami
+      // a v uživatelské hlášce vypadal jako důvod, proč stažení selhalo.
+      '--no-update',
       '-f', isVideo ? vfmt : 'bestaudio[ext=webm]/bestaudio',
       '-o', path.join(outDir, (isVideo ? 'bg ' : '') + '%(title).80s [%(id)s].%(ext)s'),
       '--no-mtime', '--force-overwrites', '--newline',
@@ -744,6 +786,25 @@ ipcMain.handle('audio:openDialog', async () => {
   const p = r.filePaths[0];
   try { const data = await fs.readFile(p); return {path: p, name: path.basename(p), data}; }
   catch(err){ return {error: 'Could not read the audio file: ' + err.message}; }
+});
+
+// Background video z disku. Přípony jsou stejné jako u autodetekce ve složce písničky,
+// plus .mov (macOS QuickTime — časté pro nahrávky z iPhonu / kamery, které lidé rovnou
+// tahají do editoru). Za pozadím se přehrává BEZ ZVUKU, takže se nekonvertuje na mp4:
+// buffer se předává rendereru tak, jak leží. Když video není v progresivním mp4 (např.
+// fragmentované DASH stáhnuté mimo náš yt-dlp), Clone Hero ho při exportu nepřehraje,
+// ale v editoru je vidět — na tohle upozorňujeme přes hint v UI, ne rebuildem tady.
+const VIDEO_EXTS = ['mp4', 'webm', 'mov', 'avi', 'mpeg', 'mpg', 'mkv'];
+const VIDEO_FILTERS = [
+  {name: 'Video', extensions: VIDEO_EXTS},
+  {name: 'All files', extensions: ['*']},
+];
+ipcMain.handle('video:openDialog', async () => {
+  const r = await dialog.showOpenDialog(win, {filters: VIDEO_FILTERS, properties: ['openFile']});
+  if(r.canceled || !r.filePaths.length) return null;
+  const p = r.filePaths[0];
+  try { const data = await fs.readFile(p); return {path: p, name: path.basename(p), data}; }
+  catch(err){ return {error: 'Could not read the video file: ' + err.message}; }
 });
 
 // ---------- Menu ----------
@@ -839,6 +900,7 @@ function buildMenu(){
     {label: 'Open song folder…', accelerator: 'CmdOrCtrl+Shift+O', click: () => sendMenu('openfolder')},
     {label: 'Open recent', submenu: recentSubmenu()},
     {label: 'Load audio…', accelerator: 'CmdOrCtrl+L', click: () => sendMenu('audio')},
+    {label: 'Load background video…', accelerator: 'CmdOrCtrl+Shift+V', click: () => sendMenu('videofile')},
     {type: 'separator'},
     {label: 'Save project', accelerator: 'CmdOrCtrl+S', click: () => sendMenu('save')},
     {label: 'Save project As…', accelerator: 'CmdOrCtrl+Shift+S', click: () => sendMenu('saveas')},
