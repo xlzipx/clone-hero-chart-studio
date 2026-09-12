@@ -121,10 +121,12 @@ Press <kbd>F1</kbd> for the full list of keyboard shortcuts.
 
 ```
 app/
-  package.json          electron + electron-builder (NSIS installer)
+  package.json          electron + electron-builder (Windows NSIS, macOS dmg)
+  build/                installer assets (Windows .ico, shared icon.png for macOS)
   src/main.js           main process: window, native dialogs, menu, unsaved-changes guard
   src/preload.js        contextBridge API (window.forge)
   src/renderer/         the editor itself — one index.html, zero dependencies
+.github/workflows/      builds the macOS .dmg in the cloud on every version tag
 assets/                 source artwork (logo, tool icons)
 sample/notes.chart      test chart used by the smoke test
 ```
