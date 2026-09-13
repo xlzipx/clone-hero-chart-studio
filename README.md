@@ -1,4 +1,3 @@
-# Clone Hero Chart Studio (CHS)
 <img width="2172" height="724" alt="CHS_banner" src="https://github.com/user-attachments/assets/53f7b874-d068-4871-878e-1bd2b0ffcc3c" />
 
 A desktop app for **Windows** and **macOS** for creating and editing
