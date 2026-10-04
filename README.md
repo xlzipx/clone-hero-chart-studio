@@ -1,4 +1,4 @@
-# Clone Hero Chart Studio (CHS)
+<img width="2172" height="724" alt="CHS_banner" src="https://github.com/user-attachments/assets/53f7b874-d068-4871-878e-1bd2b0ffcc3c" />
 
 A desktop app for **Windows** and **macOS** for creating and editing
 [Clone Hero](https://clonehero.net) charts — drums and 5-fret guitar/bass — running on its own
@@ -148,11 +148,10 @@ artwork drawn for this project. yt-dlp is downloaded on demand at runtime and is
 
 ## About
 
-This is a fan project. I chart songs for Clone Hero myself, and I wanted an editor that felt
-more intuitive and more fun to work in. I also wanted a few things the usual tools leave out,
-where you normally end up switching between separate programs: pulling audio straight from a
-link, syncing lyrics, putting a video behind the highway, or playtesting your own chart without
-leaving the editor.
+This is a fan project. I wanted an editor that felt more intuitive and more fun to work in.
+I also wanted a few things the usual tools leave out, where you normally end up switching
+between separate programs: pulling audio straight from a link, syncing lyrics, putting a
+video behind the highway, or playtesting your own chart without leaving the editor.
 
 To be upfront about it, and as my bio says: I am not a programmer. I am a player with ideas,
 and Claude Code helps me turn them into something that actually runs. So expect a rough edge
