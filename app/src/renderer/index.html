@@ -846,7 +846,7 @@
       <label style="font-size:12px; color:var(--dim); min-width:88px;" title="video_start_time in the song.ini — positive = the video is trimmed at the start, negative = the video is delayed">Offset (ms)</label>
       <input type="range" id="mVideoOffRng" min="-30000" max="30000" step="10" value="0" style="flex:1;">
       <input type="number" id="mVideoOff" step="10" value="0" style="width:96px;">
-      <button id="mVideoSyncHere" class="btn-sm" title="Set the offset so THIS moment of the video plays at the current playhead position. Move the playhead to where a video cue should hit in the song, put the video preview to that cue, and press this.">Sync at playhead</button>
+      <button id="mVideoSyncHere" class="btn-sm" title="Make the video start (its first frame) exactly at the current playhead position. Move the playhead to the moment in the song where the video should begin, then press this.">Video starts here</button>
       <button id="mVideoOffZero" class="btn-sm" title="Reset offset back to 0 ms">0</button>
     </div>
     <div class="hint" style="margin-top:4px;"><b>+</b> ms trims the start of the video · <b>−</b> ms delays it (freezes on the first frame until the song catches up). Shortcuts during playback: <kbd>.</kbd> / <kbd>,</kbd> nudge by 100 ms.</div>
@@ -1142,6 +1142,15 @@
     <span id="ytStatus" style="margin-right:auto; color:var(--dim); font-size:12px;"></span>
     <button id="ytClose">Close</button>
     <button id="ytUse" class="primary">⬇ Download</button>
+  </div>
+</dialog>
+
+<!-- Hlášky a potvrzení (náhrada nativních alert/confirm — viz uiMessage v JS) -->
+<dialog id="msgDlg" style="min-width:320px; max-width:520px;">
+  <div id="msgText" style="white-space:pre-wrap; line-height:1.55; font-size:13px; margin:2px 0 4px;"></div>
+  <div class="btns">
+    <button id="msgCancel">Cancel</button>
+    <button id="msgOk" class="primary">OK</button>
   </div>
 </dialog>
 
@@ -1457,6 +1466,19 @@ let tempoMap = [];
 
 // ---------- Pomůcky ----------
 const $ = id => document.getElementById(id);
+// Spojit složku a jméno souboru oddělovačem, který ta cesta už používá (Windows \, macOS /).
+function joinPath(dir, name){
+  if(!dir) return name;
+  const sep = (dir.includes('/') && !dir.includes('\\')) ? '/' : '\\';
+  return dir.replace(/[\\/]+$/, '') + sep + name;
+}
+// Cesta ↔ file:// URL korektně na obou systémech (dřív macOS ztratil úvodní lomítko → album chybělo)
+function pathToFileUrl(p){ const q = String(p).replace(/\\/g, '/'); return encodeURI('file://' + (q.startsWith('/') ? '' : '/') + q); }
+function fileUrlToPath(u){
+  let p = decodeURIComponent(String(u).replace(/^file:\/\//, ''));
+  if(/^\/[A-Za-z]:/.test(p)) p = p.slice(1);           // /C:/… → C:/…
+  return p;
+}
 const clamp = (v,a,b) => Math.max(a, Math.min(b, v));
 
 // Platforma. Zkratky (Ctrl+C vs. ⌘C) i systémové mazací klávesy (Del vs. ⌫) se liší
@@ -1470,6 +1492,44 @@ const IS_MAC = !!(window.forge && window.forge.platform === 'darwin');
 const MOD = e => IS_MAC ? e.metaKey : e.ctrlKey;
 const MOD_LABEL = IS_MAC ? '⌘' : 'Ctrl';
 const DEL_KEY = e => e.code === 'Delete' || (IS_MAC && e.code === 'Backspace');
+// Hlášky a potvrzení UVNITŘ stránky místo nativního alert()/confirm().
+// Nativní dialog v Electronu na Windows po zavření nevrátí oknu vstup: tlačítka a klávesy
+// přestanou reagovat, dokud uživatel okno znovu neaktivuje (Alt+Tab) — přesně hlášené
+// „zamrzání tlačítek". Vlastní <dialog> zůstává celý v Chromiu, takže o fokus nepřijde.
+// Hlášky se řadí do fronty (dvě najednou se nepřekryjí). Esc = Cancel.
+// uiAlert(text)          → Promise<void>, není nutné na ni čekat
+// await uiConfirm(text)  → true / false
+var _msgChain = null;
+function uiMessage(text, withCancel){
+  const run = () => new Promise(resolve => {
+    const dlg = $('msgDlg');
+    if(!dlg){ resolve(withCancel ? false : true); return; }
+    $('msgText').textContent = String(text == null ? '' : text);
+    $('msgCancel').hidden = !withCancel;
+    let settled = false;
+    const done = v => {
+      if(settled) return; settled = true;
+      dlg.removeEventListener('close', onClose);
+      $('msgOk').onclick = $('msgCancel').onclick = null;
+      if(dlg.open) dlg.close();
+      invalidate();
+      resolve(v);
+    };
+    const onClose = () => done(false);            // Esc / zavření jinak než tlačítkem = Cancel
+    dlg.addEventListener('close', onClose);
+    $('msgOk').onclick = () => done(true);
+    $('msgCancel').onclick = () => done(false);
+    try { dlg.showModal(); } catch(e){ dlg.show(); }
+    localizeShortcuts(dlg);
+    try { $('msgOk').focus(); } catch(e){}
+  });
+  const p = (_msgChain || Promise.resolve()).then(run, run);
+  _msgChain = p.catch(() => {});
+  return p;
+}
+function uiAlert(text){ return uiMessage(text, false); }
+function uiConfirm(text){ return uiMessage(text, true); }
+
 // Přepíše všechny "Ctrl+…" / "Ctrl" v title atributech (tooltipy) i v hláškách tak, aby na Macu
 // místo Ctrl bylo ⌘. Ušetří to duplicitní psaní každého textu.
 function localizeShortcuts(root){
@@ -2729,9 +2789,9 @@ function unplaceLastLyric(){
   writeLyricsToEvents(); markDirty();
 }
 // smazat VŠECHNY nasazené body (časování + konce frází) — text slabik zůstane, jde znovu synchronizovat
-function clearLyricPoints(){
+async function clearLyricPoints(){
   if(!state.lyrics.some(s => s.tick != null || s.end != null)) return;
-  if(!confirm('Clear all timing points? The lyric text stays — only the sync is removed.')) return;
+  if(!await uiConfirm('Clear all timing points? The lyric text stays — only the sync is removed.')) return;
   const before = snapshot();
   for(const s of state.lyrics){ s.tick = null; s.end = null; }
   state.lyricCursor = 0;
@@ -2753,7 +2813,7 @@ function toggleLyricSync(){
   draw();
 }
 let _lyricFlash = '';
-function flashLyric(msg){ _lyricFlash = msg; clearTimeout(flashLyric._t); flashLyric._t = setTimeout(() => { _lyricFlash = ''; }, 1400); }
+function flashLyric(msg){ _lyricFlash = msg; clearTimeout(flashLyric._t); flashLyric._t = setTimeout(() => { _lyricFlash = ''; invalidate(); }, 1400); invalidate(); }
 
 function setTsAt(tick, num, den){
   const cur = state.chart.syncTrack.find(e => e.kind === 'TS' && e.tick === tick);
@@ -2820,9 +2880,13 @@ function newChart(){
 // structuredClone místo JSON.stringify/parse: ~2× rychlejší a bez řetězcové mezikopie
 // (snapshot běží synchronně v pointerdown handleru → na velkých chartech znatelné).
 function snapshot(){ return {t: state.trackName, c: structuredClone(state.chart)}; }
+const UNDO_KEEP_KEYS = ['DFAudioPath', 'DFVideoPath', 'MusicStream'];
 function restore(s){
+  const keep = {};
+  if(state.chart) for(const k of UNDO_KEEP_KEYS) keep[k] = getSongVal(k);
   // klonovat i při obnově — uložený snapshot musí zůstat nedotčený pro opakované undo/redo
   state.chart = structuredClone(s.c);
+  for(const k of UNDO_KEEP_KEYS) if(keep[k] !== undefined) setSongVal(k, keep[k] || '', true);
   if(s.t) state.trackName = s.t;
   refreshTrackSelect();
   updateToolPaletteForInstrument();
@@ -3073,6 +3137,9 @@ function drawSelection2D(){
 function draw(){
   ctx.clearRect(0, 0, W, H);
   if(!state.chart) return;
+  // Pojistka: neplatná pozice (NaN z poškozeného projektu / dělení nulou) shazovala KAŽDÝ snímek
+  // výjimkou z createLinearGradient — plocha zamrzla na posledním obrazu až do nového načtení.
+  if(!Number.isFinite(state.scrollTick)) state.scrollTick = 0;
   if(state.view === 'split') drawSplit();
   else if(state.view === '3d'){ _view3dOriginX = 0; draw3D(); }
   else {
@@ -3479,6 +3546,11 @@ function drawSP(from, to){
     ctx.fillRect(HW_X, y1, HW_W, y2 - y1);
     ctx.strokeStyle = 'rgba(80,170,255,0.45)';
     ctx.strokeRect(HW_X + 0.5, y1 + 0.5, HW_W - 1, y2 - y1 - 1);
+    // popisek u začátku fráze jako SOLO / FILL / ROLL — ale vpravo: SP často začíná na stejném
+    // ticku jako sólo a levé popisky by se přepsaly přes sebe
+    ctx.fillStyle = 'rgba(80,170,255,0.95)'; ctx.font = 'bold 11px "Segoe UI"'; ctx.textAlign = 'right';
+    ctx.fillText('STAR POWER', HW_X + HW_W - 5, y2 - 4);
+    ctx.textAlign = 'left';
   }
 }
 // solo markery (fialová) + drum rolls (zelená) — 2D pruhy s popiskem, jako SP
@@ -3762,7 +3834,10 @@ function syncBgVideo(el){
   if(!el || !el.duration || !isFinite(el.duration)) return;
   const b = _bgVid;
   // Kladný video_start_time posune video dopředu (přeskočí kus), záporný ho drží na 0 kým skladba dojde.
-  const want = Math.max(0, Math.min(el.duration - 0.05, tickToTime(state.scrollTick) + videoOffsetSec()));
+  // Čas videa = čas AUDIA (chart + Offset, stejně jako startPlay) + offset videa. Dřív tu
+  // Offset chartu chyběl, takže po srovnání mřížky Offsetem video v editoru ujíždělo o tolik,
+  // a když to uživatel „opravil" offsetem videa, ve hře pak bylo špatně.
+  const want = Math.max(0, Math.min(el.duration - 0.05, tickToTime(state.scrollTick) + getOffset() + videoOffsetSec()));
   const now = performance.now();
   if(state.playing){
     if(b){ b.want = null; b.seekAt = 0; b.wasPlaying = true; }
@@ -4777,7 +4852,7 @@ function placeNote(tick, lane, open, addOnly){
 const SHIFT_PHRASES = ['solo', 'rolls', 'fills'];
 // posunout VŠECHNY noty (všechny obtížnosti) + SP + sekce o delta ticků; tempo/TS = pevná osa
 // slouží k posunutí celého bloku not (lead-in / doladění vůči audiu)
-function shiftAllNotes(deltaTicks){
+function shiftAllNotes(deltaTicks, isRepeat){
   if(!state.chart || !deltaTicks) return 0;
   const anno0 = findAnnoSection();
   // při posunu doleva omezit deltu, ať se NEJNIŽŠÍ nota/SP/sekce/vlajka nedostane pod tick 0
@@ -4797,7 +4872,7 @@ function shiftAllNotes(deltaTicks){
     if(minTick !== Infinity) deltaTicks = Math.max(deltaTicks, -minTick);
     if(deltaTicks === 0) return 0;   // už u kraje, není kam posunout
   }
-  const before = snapshot();
+  const before = isRepeat ? null : snapshot();   // držení = jeden undo krok za celé gesto
   let count = 0, touched = false;
   for(const name of Object.keys(state.chart.tracks)){
     const tr = state.chart.tracks[name];
@@ -4824,7 +4899,7 @@ function shiftAllNotes(deltaTicks){
   };
   shiftSection(state.chart.otherSections.find(s => s.name === 'Events'));
   shiftSection(anno0);
-  if(touched) pushUndo(before);
+  if(touched && before) pushUndo(before);
   return count;
 }
 
@@ -4881,11 +4956,31 @@ function addPhrase(type, tick, len){
 function removePhrase(type, ph){ const list = phraseListFor(type); const i = list.indexOf(ph); if(i >= 0) list.splice(i, 1); }
 const PHRASE_TOOLS = new Set(['sp', 'solo', 'roll', 'roll2', 'fill']);
 
+// Fráze (SP / sólo / fill / roll) pod daným tickem — pro mazání pravým tlačítkem.
+// Překrývají-li se (typicky Star Power uvnitř sóla), vyhrává:
+//  1) typ, jehož nástroj je právě vybraný (uživatel s ním zrovna pracuje),
+//  2) jinak nejkratší fráze = ta „nejvnitřnější", na kterou uživatel nejspíš míří.
+function phraseUnderTick(t){
+  const tr = curTrack();
+  const toolType = state.tool === 'roll2' ? 'roll' : state.tool;
+  let best = null;
+  for(const [type, list] of [['sp', tr.sp], ['solo', tr.solo], ['fill', tr.fills], ['roll', tr.rolls]]){
+    for(const ph of (list || [])){
+      if(t < ph.tick || t > ph.tick + ph.len) continue;
+      const pri = type === toolType ? 0 : 1;
+      if(!best || pri < best.pri || (pri === best.pri && ph.len < best.ph.len)) best = {type, ph, pri};
+    }
+  }
+  return best;
+}
 function startErase(pos){
-  state.eraseDrag = {before: snapshot(), changed: false};
+  state.eraseDrag = {before: snapshot(), changed: false, phrase: null};
   const hit = noteAt(pos);
   if(hit){ removeNote(hit); state.eraseDrag.changed = true; }
   else if(removeAnnoAtTick(yToTick(pos.y), getResolution() / 2)) state.eraseDrag.changed = true;   // guma maže i note flag
+  // Klik do prázdného místa uvnitř fráze → frázi smazat, ale až při PUŠTĚNÍ tlačítka a jen když
+  // guma mezitím nesmazala žádnou notu (táhnutí přes noty ve fázi = maže noty, fázi nechá být).
+  else if(laneFromX(pos.x) >= 0) state.eraseDrag.phrase = phraseUnderTick(yToTick(pos.y));
 }
 
 // ---------- Editace ve 3D (inverzní projekce myš -> chart) ----------
@@ -5000,7 +5095,7 @@ function handle3DMouseDown(e, pos){
     if(inBtn(m.sync)){ toggleLyricSync(); return; }
     if(inBtn(m.snap)){ cycleLyricSnap(); return; }
     if(inBtn(m.zoom)){ toggleLyricZoom(); return; }
-    if(inBtn(m.clear)){ clearLyricPoints(); return; }
+    if(inBtn(m.clear)){ setTimeout(clearLyricPoints, 0); return; }   // NE z mousedown: dialog by spolkl mouseup
     if(inBtn(m.help)){ openLyricsHelp(); return; }
     if(karSyl){ setLyricCursorTo(karSyl.syl); if(karSyl.syl.tick != null) seekTo(karSyl.syl.tick); flashLyric('Next: ' + karSyl.syl.text); return; }
     // přehledový proužek (v lupě): oranžové okno = scrollbar palec (uchopit a táhnout celé okno),
@@ -5030,7 +5125,15 @@ function handle3DMouseDown(e, pos){
   if(e.button === 2 || tool === 'erase'){
     const hit = noteNear3D(tick, lane);
     if(hit){ const before = snapshot(); removeNote(hit); pushUndo(before); }
-    else { const before = snapshot(); if(removeAnnoAtTick(tick, getResolution() / 2)) pushUndo(before); }   // guma maže i note flag
+    else {
+      const before = snapshot();
+      if(removeAnnoAtTick(tick, getResolution() / 2)) pushUndo(before);   // guma maže i note flag
+      else if(e.button === 2 && lane >= 0){
+        // pravý klik do prázdné části fráze (bez noty) = smazat frázi — stejně jako ve 2D
+        const ph = phraseUnderTick(cp.tick);
+        if(ph){ removePhrase(ph.type, ph.ph); pushUndo(before); markDirty(); bumpRev(); }
+      }
+    }
     return;
   }
   if(e.button !== 0) return;
@@ -5343,27 +5446,37 @@ cv.addEventListener('mousemove', e => {
   if(state.phraseDrag){ state.phraseDrag.endTick = snapTick(yToTick(pos.y)); return; }
 });
 
-cv.addEventListener('mouseleave', () => { state.hover = null; state.hoverNote = null; state.hover3d = null; state.lyricHoverSyl = null; });
+cv.addEventListener('mouseleave', () => { state.hover = null; state.hoverNote = null; state.hover3d = null; state.lyricHoverSyl = null; checkHoverChanged(); });
 
-window.addEventListener('mouseup', () => {
+// Ukončení VŠECH rozdělaných gest myší (tažení, malování, posuv, scrub…).
+// Dřív to dělal jen `mouseup` a každá větev končila `return`, takže:
+//  - když `mouseup` nepřišel (Alt+Tab uprostřed tažení, puštění tlačítka mimo okno, nativní
+//    dialog otevřený zkratkou), zůstal příznak navždy nastavený — plátno „zamrzlo"
+//    (mousemove se u některých příznaků hned vracel), malovalo noty bez stisknutého tlačítka
+//    nebo posouvalo Offset; kurzor zůstal „grabbing"
+//  - při dvou zaseknutých příznacích bylo potřeba několik kliknutí, než se plocha probrala.
+// Teď se ukončí všechno najednou a volá se i při ztrátě fokusu okna a při `pointercancel`.
+// `commit=false` (ztráta fokusu) rozdělanou změnu NEzahazuje — jen ji uzavře do undo kroku.
+const GESTURE_KEYS = ['lyricPan','lyricDrag','panDrag','miniWindowDrag','miniScrub','miniOverviewScrub','splitDrag',
+                      'mapDrag','paint','selMove','selDrag','offsetDrag','eraseDrag','phraseDrag'];
+function gestureActive(){ return GESTURE_KEYS.some(k => state[k]); }
+function endPointerGestures(fromRelease){
   endSeekDrag();   // po tažení dorovnat zvuk na novou pozici (jednou, ne 60× za vteřinu)
-  if(state.lyricPan){ state.lyricPan = null; cv.style.cursor = ''; return; }
+  if(state.lyricPan){ state.lyricPan = null; }
   if(state.lyricDrag){
     const d = state.lyricDrag; state.lyricDrag = null;
     if(d.moved){ writeLyricsToEvents(); recomputeLyricCursor(); pushUndo(d.before); markDirty(); }
-    else { seekTo(d.syl.tick); setLyricCursorTo(d.syl); flashLyric('Next: ' + d.syl.text); }   // klik = skok na slabiku + kurzor sem (re-sync odsud)
-    return;
+    else if(fromRelease){ seekTo(d.syl.tick); setLyricCursorTo(d.syl); flashLyric('Next: ' + d.syl.text); }   // klik = skok na slabiku + kurzor sem (re-sync odsud)
   }
-  if(state.panDrag){ state.panDrag = null; cv.style.cursor = ''; return; }
-  if(state.miniWindowDrag){ state.miniWindowDrag = null; return; }
-  if(state.miniScrub){ state.miniScrub = false; return; }
-  if(state.miniOverviewScrub){ state.miniOverviewScrub = false; return; }
-  if(state.splitDrag){ state.splitDrag = false; return; }
-  if(state.mapDrag){ state.mapDrag = false; endSeekDrag(); cv.style.cursor = ''; return; }
+  if(state.panDrag) state.panDrag = null;
+  if(state.miniWindowDrag) state.miniWindowDrag = null;
+  if(state.miniScrub) state.miniScrub = false;
+  if(state.miniOverviewScrub) state.miniOverviewScrub = false;
+  if(state.splitDrag) state.splitDrag = false;
+  if(state.mapDrag) state.mapDrag = false;
   if(state.paint){                                   // dokončit malování not
     const p = state.paint; state.paint = null;
     if(p.changed){ pushUndo(p.before); markDirty(); }
-    return;
   }
   if(state.selMove){
     const m = state.selMove; state.selMove = null;
@@ -5373,22 +5486,34 @@ window.addEventListener('mouseup', () => {
       pushUndo(m.before); markDirty();
     }
     updateSelInfo();
-    return;
   }
-  if(state.selDrag){ state.selDrag = null; if(!selRange()) state.selection = null; updateSelInfo(); return; }
-  if(state.offsetDrag){ const d = state.offsetDrag; state.offsetDrag = null; if(d.moved) pushUndo(d.before); return; }
+  if(state.selDrag){ state.selDrag = null; if(!selRange()) state.selection = null; updateSelInfo(); }
+  if(state.offsetDrag){ const d = state.offsetDrag; state.offsetDrag = null; if(d.moved) pushUndo(d.before); }
   if(state.eraseDrag){
     const ed = state.eraseDrag; state.eraseDrag = false;
+    // pravý klik do prázdné části fráze (nic jiného nesmazal) → smazat frázi
+    if(fromRelease && !ed.changed && ed.phrase){
+      removePhrase(ed.phrase.type, ed.phrase.ph);
+      ed.changed = true;
+      markDirty(); bumpRev();
+    }
     if(ed.changed) pushUndo(ed.before);
-    return;
   }
   if(state.phraseDrag){
     const pd = state.phraseDrag; state.phraseDrag = null;
     const a = Math.min(pd.startTick, pd.endTick), b = Math.max(pd.startTick, pd.endTick);
-    if(b > a){ addPhrase(pd.type, a, b - a); pushUndo(pd.before); }
-    return;
+    if(fromRelease && b > a){ addPhrase(pd.type, a, b - a); pushUndo(pd.before); }
   }
-});
+  cv.style.cursor = '';
+  invalidate();
+}
+window.addEventListener('mouseup', () => endPointerGestures(true));
+// Pojistky pro ztracený `mouseup`: okno ztratí fokus (Alt+Tab), stránka se skryje, systém gesto zruší.
+window.addEventListener('blur', () => { if(gestureActive() || _seekDragging) endPointerGestures(false); });
+document.addEventListener('visibilitychange', () => { if(document.hidden && (gestureActive() || _seekDragging)) endPointerGestures(false); });
+window.addEventListener('pointercancel', () => { if(gestureActive() || _seekDragging) endPointerGestures(false); });
+// Tlačítko bylo puštěno mimo okno: první pohyb nad plátnem bez stisknutého tlačítka gesto ukončí.
+cv.addEventListener('mousemove', e => { if(e.buttons === 0 && gestureActive()) endPointerGestures(false); }, true);
 
 // výběr nástroje
 // zvýraznit aktivní tlačítko: note-tlačítka (tom/cymbal/kick) dle režimu, ostatní dle nástroje
@@ -5788,6 +5913,7 @@ const HELP_CONTENT = [
     {kb:'roll2', desc:'Special roll <span class="dim2">(drums)</span>'},
     {kb:'fill', desc:'SP activation / drum fill <span class="dim2">(drums)</span>'},
     {kb:'flag', desc:'Note flag'},
+    {keys:'<kbd>RMB</kbd>', desc:'Right-click an empty spot inside SP / solo / roll / fill = remove it <span class="dim2">(notes keep priority)</span>'},
   ]},
   {title:'Playback', rows:[
     {kb:'play', desc:'Play / stop'},
@@ -5909,9 +6035,9 @@ if($('lyricsDlg')){
     writeLyricsToEvents(); pushUndo(before); markDirty();
     $('lyricsDlg').close(); draw();
   });
-  $('lyricsClear').addEventListener('click', () => {
+  $('lyricsClear').addEventListener('click', async () => {
     if(state.lyrics.length){
-      if(!confirm('Remove ALL lyrics from the chart? (Ctrl+Z undoes it.)')) return;
+      if(!await uiConfirm('Remove ALL lyrics from the chart? (Ctrl+Z undoes it.)')) return;
       const before = snapshot(); state.lyrics = []; state.lyricCursor = 0; writeLyricsToEvents(); pushUndo(before); markDirty();
     }
     $('lyricsText').value = ''; $('lyricsDlg').close(); draw();
@@ -5999,7 +6125,7 @@ window.addEventListener('keydown', e => {
     else if(k === 'y' || (k === 'z' && e.shiftKey)){ e.preventDefault(); redo(); }
     else if(k === 'c'){ e.preventDefault(); copySelection(false); }   // kopírovat vybraný vzor
     else if(k === 'x'){ e.preventDefault(); copySelection(true); }    // vyjmout
-    else if(k === 'v'){ e.preventDefault(); pasteClipboard(); }       // vložit od strikeline
+    else if(k === 'v' && !e.shiftKey){ e.preventDefault(); pasteClipboard(); }       // vložit od strikeline (Shift = menu: načíst video)
     return;
   }
   // pevné strukturální klávesy
@@ -6007,11 +6133,11 @@ window.addEventListener('keydown', e => {
   if(e.code === 'End'){ jumpToEnd(); return; }
   if(e.key === '['){ jumpToFlag(-1); return; }
   if(e.key === ']'){ jumpToFlag(1); return; }
-  if(DEL_KEY(e)){ deleteSelection(); return; }                         // smazat vybraný rozsah (Del i Backspace na Macu)
+  if(DEL_KEY(e) && !(state.lyricSync && e.code === 'Backspace')){ deleteSelection(); return; }                         // smazat vybraný rozsah (Del i Backspace na Macu)
   if(e.code === 'Escape'){ state.selection = null; updateSelInfo(); return; }   // zrušit výběr
   // Shift+↑ / ↓ = posunout VŠECHNY noty o 1 snap krok (↑ = později / dopředu, ↓ = dříve / zpět)
   if(e.shiftKey && (e.code === 'ArrowUp' || e.code === 'ArrowDown')){
-    e.preventDefault(); shiftAllNotes(e.code === 'ArrowUp' ? snapStep() : -snapStep()); return;
+    e.preventDefault(); shiftAllNotes(e.code === 'ArrowUp' ? snapStep() : -snapStep(), e.repeat); return;
   }
   // Lyrics sync: Enter sází další slabiku na playhead, Backspace o krok zpět
   if(state.lyricSync){
@@ -6028,8 +6154,8 @@ window.addEventListener('keydown', e => {
   if(e.key === '-'){ setScale(state.scale * 0.87); return; }
   // Nudge video offsetu za přehrávání: „,"/„." = ±100 ms (Shift = ±10 ms, jemnější).
   // Funguje jen když je pozadí video — bez toho nemá nic vliv a klávesy se pouštějí dál na keybindy.
-  if((e.key === '.' || e.key === ',') && state.bgVideo){
-    const dir = e.key === '.' ? 1 : -1;
+  if((e.code === 'Period' || e.code === 'Comma') && state.bgVideo){
+    const dir = e.code === 'Period' ? 1 : -1;
     const step = e.shiftKey ? 10 : 100;
     const cur = parseFloat(state.songIni.video_start_time) || 0;
     setVideoOffsetMs(cur + dir * step);
@@ -6163,13 +6289,14 @@ function waveSpan(w, tA, tB){
 }
 function setStems(stems){
   stopPlay();
+  dropStaleAudioRows();
   if(!stems.length){ state.audio = null; $('stAudio').textContent = ''; refreshWaveSelect(); return; }
   let duration = 0;
   for(const s of stems) duration = Math.max(duration, s.buffer.duration);
   for(const s of stems){
     if(!s.role) s.role = roleFromName(s.name);
     if(s.muted === undefined) s.muted = false;
-    s.peaks = computeStemPeaks(s.buffer, duration);   // per-stem waveform
+    if(!s.peaks) s.peaks = computeStemPeaks(s.buffer, duration);   // per-stem waveform (jen nové stopy)
   }
   const len = Math.ceil(duration / PEAK_DT) + 1;                       // mix = max přes všechny stopy
   const peaks = {peak: new Float32Array(len), rms: new Float32Array(len), rmsMax: 0};
@@ -6232,7 +6359,7 @@ async function loadAudioFile(file){
     const p = window.forge && forge.pathForFile ? forge.pathForFile(file) : null;
     setStemBuffer(role, stem.buffer, file.name, {path: p, bytes: p ? null : bytes});
     if(role === 'song') setAudioSource(p, file.name);
-  } else alert('Could not decode audio: ' + file.name);
+  } else uiAlert('Could not decode audio: ' + file.name);
 }
 function escapeHtml(s){ return s.replace(/[&<>"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c])); }
 function u8ToArrayBuffer(data){
@@ -6255,7 +6382,9 @@ function startPlay(){
     const audioStart = songT0 + getOffset();
     for(const stem of state.audio.stems){
       if(stem.muted) continue;                              // ztlumený stem se nepřehrává
-      if(audioStart >= stem.buffer.duration) continue;
+      // „Video audio" žije v čase VIDEA → posunout o offset videa, ať sedí na svůj obraz
+      const st = audioStart + (stem.role === 'video' ? videoOffsetSec() : 0);
+      if(st >= stem.buffer.duration) continue;
       const src = ctxA.createBufferSource();
       src.buffer = stem.buffer;
       src.playbackRate.value = speed;         // slow-down / speed-up pro přesné vkládání
@@ -6263,14 +6392,21 @@ function startPlay(){
       sg.gain.value = stem.volume == null ? 1 : stem.volume;
       src.connect(sg); sg.connect(masterGain);
       stemGains[stem.role] = sg;
-      if(audioStart >= 0) src.start(startAt, audioStart);
-      else src.start(startAt - audioStart / speed, 0);
+      if(st >= 0) src.start(startAt, st);
+      else src.start(startAt - st / speed, 0);
       srcs.push(src);
     }
   }
   state.play = {ctx: ctxA, srcs, t0: startAt, songT0, speed, clicks: [], stemGains};
-  if(state.metronome) scheduleMetronome(ctxA, startAt, songT0, speed);
-  if(state.clap) scheduleClaps(ctxA, startAt, songT0, speed);
+  const cues = [];
+  if(state.metronome) collectMetronome(songT0, cues);
+  if(state.clap) collectClaps(songT0, cues);
+  if(cues.length){
+    cues.sort((x, y) => x.st - y.st);
+    state.play.cues = cues; state.play.cueIdx = 0;
+    pumpCues();
+    state.play.cueTimer = setInterval(pumpCues, CUE_PUMP_MS);
+  }
   if(state.playtest && !ptCanResume()) ptReset();   // pauza → pokračuje se, jinak čerstvé skóre
   state.playing = true;
   setPlayIcon(true);
@@ -6285,10 +6421,12 @@ function setPlayIcon(playing){
     : '<path d="M7 4l13 8-13 8z" class="fillable"/>';
 }
 function stopPlay(){
+  if(typeof _previewTimer !== 'undefined' && _previewTimer){ clearTimeout(_previewTimer); _previewTimer = null; }
   _clk = null;                                         // příští jízda se ukotví načisto
   if(state.play){
     for(const src of state.play.srcs){ try{ src.stop(); }catch(e){} }
-    for(const o of (state.play.clicks || [])){ try{ o.stop(); }catch(e){} }
+    if(state.play.cueTimer) clearInterval(state.play.cueTimer);
+    for(const o of (state.play.clicks || [])){ try{ o.stop(); }catch(e){} try{ o.disconnect(); }catch(e){} }
   }
   state.play = null;
   state.playing = false;
@@ -6297,35 +6435,38 @@ function stopPlay(){
   if(state.playtest && ptHasRun) ptStopTick = state.scrollTick;   // odsud lze pokračovat
   setPlayIcon(false);
 }
-// naplánuje click na každou dobu od kurzoru do konce (accent na první době taktu)
-function scheduleMetronome(ctxA, t0, songT0, speed){
+// Metronom a clapy: při startu se spočítají jen ČASY (levná čísla) a zvukové uzly se tvoří
+// průběžně vždy na CUE_AHEAD s dopředu (pumpCues). Dřív se při každém startu přehrávání
+// naplánovalo až 4000 kliků + 4000 clapů = ~12 000 audio uzlů synchronně: naměřeno 74 ms
+// zásek při každém startu, každém přetočení za jízdy i při každém skoku smyčky A–B.
+const CUE_AHEAD = 2.0;        // s (čas audio kontextu) — kolik dopředu mít naplánováno
+const CUE_PUMP_MS = 250;      // jak často dosypávat (běží i bez snímků, např. minimalizované okno)
+const CUE_MAX = 4000;
+function collectMetronome(songT0, out){
   const res = getResolution(), segs = tsSegments();
   const endTime = state.audio ? state.audio.duration - getOffset() : (songT0 + 240);
-  const clicks = [];
   let count = 0;
-  for(let si = 0; si < segs.length && count < 4000; si++){
+  for(let si = 0; si < segs.length && count < CUE_MAX; si++){
     const seg = segs[si];
     const segEnd = (si + 1 < segs.length) ? segs[si+1].tick : Infinity;
     // délka doby i taktu jde z time signature daného úseku, časování z tempo mapy (tickToTime)
     const beatT = res * 4 / seg.den, measT = beatT * seg.num;
     const stepT = state.metroDiv === 'bar' ? measT : state.metroDiv === '8th' ? beatT / 2 : beatT;
     let bt = seg.tick + Math.max(0, Math.ceil((state.scrollTick - seg.tick) / stepT)) * stepT;
-    for(; bt < segEnd && count < 4000; bt += stepT){
+    for(; bt < segEnd && count < CUE_MAX; bt += stepT){
       const st = tickToTime(bt);
       if(st < songT0 - 1e-6) continue;
-      if(st > endTime) { count = 4000; break; }
-      const when = t0 + (st - songT0) / speed;
+      if(st > endTime){ count = CUE_MAX; break; }
       // 2 = první doba taktu, 1 = doba, 0 = podíl mezi dobami (tišší, ať se v tom neztratíš)
       const level = Math.round((bt - seg.tick) % measT) === 0 ? 2
         : Math.round((bt - seg.tick) % beatT) === 0 ? 1 : 0;
-      clicks.push(makeClick(ctxA, when, level));
+      out.push({st, k: 0, level});
       count++;
     }
   }
-  for(const c of clicks) state.play.clicks.push(c);
 }
 // clap na každé notě aktuálního tracku (metronomický „play with claps")
-function scheduleClaps(ctxA, t0, songT0, speed){
+function collectClaps(songT0, out){
   const tr = curTrack();
   const endTime = state.audio ? state.audio.duration - getOffset() : (songT0 + 240);
   let count = 0, lastTick = -1;
@@ -6334,9 +6475,27 @@ function scheduleClaps(ctxA, t0, songT0, speed){
     lastTick = n.tick;
     const st = tickToTime(n.tick);
     if(st < songT0 - 1e-6) continue;
-    if(st > endTime || count >= 4000) break;
-    state.play.clicks.push(makeClap(ctxA, t0 + (st - songT0) / speed));
+    if(st > endTime || count >= CUE_MAX) break;
+    out.push({st, k: 1});
     count++;
+  }
+}
+function pumpCues(){
+  const p = state.play;
+  if(!p || !p.cues) return;
+  const ctxA = p.ctx, now = ctxA.currentTime, horizon = now + CUE_AHEAD;
+  while(p.cueIdx < p.cues.length){
+    const c = p.cues[p.cueIdx];
+    const when = p.t0 + (c.st - p.songT0) / p.speed;
+    if(when > horizon) break;
+    if(when >= now - 0.01) p.clicks.push(c.k ? makeClap(ctxA, when) : makeClick(ctxA, when, c.level));
+    p.cueIdx++;
+  }
+  // dohrané uzly pustit (dřív se seznam jen plnil až do konce jízdy)
+  if(p.clicks.length > 48){
+    const keep = [];
+    for(const o of p.clicks){ if((o._end || 0) > now) keep.push(o); else { try { o.disconnect(); } catch(e){} } }
+    p.clicks = keep;
   }
 }
 // Šum pro clap se vyrábí JEDNOU a všechny clapy ho sdílejí. Dřív se alokoval a plnil
@@ -6357,7 +6516,7 @@ function makeClap(ctxA, when){
   const hp = ctxA.createBiquadFilter(); hp.type = 'highpass'; hp.frequency.value = 1400;
   const g = ctxA.createGain(); g.gain.value = 0.55;
   src.connect(hp); hp.connect(g); g.connect(cueGain || ctxA.destination);
-  src.start(when);
+  src.start(when); src._end = when + 0.08;
   return src;
 }
 function makeClick(ctxA, when, level){
@@ -6368,7 +6527,7 @@ function makeClick(ctxA, when, level){
   g.gain.setValueAtTime(0.0001, when);
   g.gain.exponentialRampToValueAtTime(vol, when + 0.002);
   g.gain.exponentialRampToValueAtTime(0.0001, when + 0.045);
-  osc.start(when); osc.stop(when + 0.06);
+  osc.start(when); osc.stop(when + 0.06); osc._end = when + 0.08;
   return osc;
 }
 
@@ -6497,7 +6656,23 @@ for(const ev of ['pointerdown','pointerup','wheel','keydown','keyup','input','ch
 // pointermove zvlášť: překreslovat jen když je kurzor nad canvasem (hover highlighty)
 // nebo když je držené tlačítko (= probíhá tažení — split, malování, scrub, přečasování…).
 // Pouhý hover nad sidebarem/lištou tak zbytečně nepřekresluje highway 60×/s.
-window.addEventListener('pointermove', e => { if(e.buttons || e.target === cv) invalidate(); }, true);
+// Hover nad plátnem: překreslit jen když se hover OPRAVDU změnil. Stav hoveru je přichycený
+// na mřížku/dráhu, takže pohyb uvnitř jedné buňky (nebo nad prázdnou částí 3D) dřív
+// překresloval celé plátno 30×/s pro nic — při softwarovém vykreslování drahé.
+// Kontrola běží v posluchači `mousemove` registrovaném AŽ po hlavním handleru plátna
+// (viz konec skriptu), takže vidí už aktualizovaný stav.
+window.addEventListener('pointermove', e => { if(e.buttons) invalidate(); }, true);
+let _hoverSig = '';
+function hoverSig(){
+  const h = state.hover, h3 = state.hover3d, hn = state.hoverNote;
+  return [h && h.tick, h && h.lane, h3 && h3.tick, h3 && h3.lane, hn && hn.tick, hn && hn.fret,
+          state.lyricHoverSyl && state.lyricHoverSyl.tick, state.lyricSeekHover, state.ovWinHover,
+          state.hoverAlt, cv.style.cursor].join('|');
+}
+function checkHoverChanged(){
+  const sig = hoverSig();
+  if(sig !== _hoverSig){ _hoverSig = sig; invalidate(); }
+}
 window.addEventListener('resize', () => invalidate(800));
 // Kurzor odešel z plochy okna (nativní menu v liště, titulek, jiná aplikace) → doběh zkrátit.
 // Kreslení je při vypnuté HW akceleraci to nejdražší, co v aplikaci běží, a zaměstnává i proces
@@ -6779,7 +6954,7 @@ async function albumProjBytes(){
   const a = state.albumArt;
   if(!a || a.removed) return null;
   if(a.data && a.data.length) return a.data;
-  if(a.url && a.url.startsWith('file:')) return await readFileBytes(decodeURIComponent(a.url.replace(/^file:\/+/, '')));
+  if(a.url && a.url.startsWith('file:')) return await readFileBytes(fileUrlToPath(a.url));
   return null;
 }
 // „kde jsem byl a jak jsem to měl nastavené" — po otevření projektu se editor vrátí do stejného stavu
@@ -6919,24 +7094,30 @@ async function openRecentAction(p){
   const payload = await forge.loadSongPath(p);
   if(payload) await loadSongPayload(payload);
 }
+var _loadGen = 0;
 async function loadSongPayload(payload, opts){
   if(!payload) return;
-  if(payload.error){ alert(payload.error); return; }
-  if(state.dirty && !(opts && opts.skipConfirm) && !confirm('Discard unsaved changes?')) return;
+  if(payload.error){ uiAlert(payload.error); return; }
+  if(state.dirty && !(opts && opts.skipConfirm) && !await uiConfirm('Discard unsaved changes?')) return;
+  // Generace načítání: otevře-li se během dekódování jiný projekt (dvojklik v Open recent,
+  // dvě přetažení za sebou), starší načítání se po nejbližším čekání tiše ukončí. Dřív
+  // doběhlo a nahrálo SVOJE audio/video do chartu, který mezitím otevřelo to novější.
+  const gen = ++_loadGen;
+  const superseded = () => gen !== _loadGen;
   if(payload.kind === 'sng'){
     try { payload = sngToPayload(payload); }
-    catch(err){ alert('Could not read the .sng file: ' + err.message); return; }
+    catch(err){ uiAlert('Could not read the .sng file: ' + err.message); return; }
   }
   if(payload.kind === 'proj'){
     try { payload = projToPayload(payload); }
-    catch(err){ alert('Could not open the project: ' + err.message); return; }
+    catch(err){ uiAlert('Could not open the project: ' + err.message); return; }
   }
   let chart;
   try {
     if(payload.kind === 'mid') chart = midiToChart(new Uint8Array(u8ToArrayBuffer(payload.data)));
     else chart = parseChart(payload.text);
   } catch(err){
-    alert('Could not parse chart: ' + err.message);
+    uiAlert('Could not parse chart: ' + err.message);
     return;
   }
   state.songIni = {};
@@ -6959,23 +7140,18 @@ async function loadSongPayload(payload, opts){
   let audioDone = false;
   let audioWarn = null;                       // proč se audio nenačetlo (ať to není tiché selhání)
   const dfPath = getSongValIn(chart, 'DFAudioPath');
-  if(dfPath && window.forge){
-    try {
-      const data = await forge.readFile(dfPath);
-      if(!data || !data.length) throw new Error('soubor je prázdný');
-      const stem = await decodeToStem(u8ToArrayBuffer(data), baseName(dfPath));
-      if(stem){ stem.path = dfPath; setStems([stem]); state.audioPath = dfPath; audioDone = true; }
-      else audioWarn = 'could not be decoded';
-    } catch(err){
-      audioWarn = (err && err.message) || 'could not be read';
-      console.error('[audio] Uložená cesta projektu selhala:', dfPath, err);
-    }
-  }
-  // .sng: audio přibalené v souboru (bajty v paměti, žádné cesty na disku)
-  if(!audioDone && payload.sngAudio && payload.sngAudio.length){
+  // Cestu k videu přečíst HNED: setBgVideo(null) níž ji v chartu maže, takže dřív se video
+  // přes DFVideoPath nedalo obnovit nikdy (čtení přišlo až po smazání).
+  const dfVideoPath = getSongValIn(chart, 'DFVideoPath');
+  // .chartproj / .sng nese VŠECHNY stopy i s hlasitostí a ztlumením — ty mají přednost.
+  // Dřív vyhrálo DFAudioPath (jediný soubor) a projekt se po znovuotevření vrátil jen se
+  // stopou Song: kytara, basa, video audio i nastavení hlasitostí se ztratily.
+  const packed = payload.sngAudio && payload.sngAudio.length ? payload.sngAudio : null;
+  if(packed){
     const stems = [];
-    for(const s of payload.sngAudio){
+    for(const s of packed){
       const stem = await decodeToStem(u8ToArrayBuffer(s.data), s.name);
+      if(superseded()) return;
       if(!stem) continue;
       stem.bytes = s.data;                       // .sng/.chartproj nesou bajty, ne cesty
       if(s.path) stem.path = s.path;
@@ -6986,8 +7162,22 @@ async function loadSongPayload(payload, opts){
     }
     if(stems.length){
       setStems(stems);
-      state.audioPath = stems.find(s => s.path) ? stems.find(s => s.path).path : null;
+      const withPath = stems.find(s => s.path && s.role !== 'video');
+      state.audioPath = withPath ? withPath.path : null;
       audioDone = true;
+    }
+  }
+  if(!audioDone && dfPath && window.forge){
+    try {
+      const data = await forge.readFile(dfPath);
+      if(!data || !data.length) throw new Error('soubor je prázdný');
+      const stem = await decodeToStem(u8ToArrayBuffer(data), baseName(dfPath));
+      if(superseded()) return;
+      if(stem){ stem.path = dfPath; setStems([stem]); state.audioPath = dfPath; audioDone = true; }
+      else audioWarn = 'could not be decoded';
+    } catch(err){
+      audioWarn = (err && err.message) || 'could not be read';
+      console.error('[audio] Uložená cesta projektu selhala:', dfPath, err);
     }
   }
   if(!audioDone){
@@ -6998,6 +7188,7 @@ async function loadSongPayload(payload, opts){
         try {
           const data = await forge.readFile(s.path);
           const stem = await decodeToStem(u8ToArrayBuffer(data), s.name);
+          if(superseded()) return;
           if(stem){ stem.path = s.path; stems.push(stem); if(!firstPath) firstPath = s.path; }
         } catch(err){ console.warn('stem load failed', s.name, err); }
       }
@@ -7016,22 +7207,26 @@ async function loadSongPayload(payload, opts){
   // background video: z předchozí písničky ho NIKDY nepřenášet (šlo by omylem do exportu téhle).
   // Vlastní video hledáme dvěma cestami — vedle chartu (hotová CH složka) a přes cestu uloženou
   // v chartu (DFVideoPath), kterou si projekt pamatuje i bez složky.
-  setBgVideo(null);
+  // {loading:true}: nemazat právě načtenou stopu „Video audio" a nehlásit neuložené změny.
+  setBgVideo(null, null, null, {loading: true});
   if(payload.projVideo && payload.projVideo.data && payload.projVideo.data.length){
-    setBgVideo(new Uint8Array(payload.projVideo.data), payload.projVideo.name, payload.projVideo.path || null);
+    setBgVideo(new Uint8Array(payload.projVideo.data), payload.projVideo.name, payload.projVideo.path || null, {loading: true});
   } else {
-    const vidPath = payload.videoPath || getSongValIn(chart, 'DFVideoPath');
+    const vidPath = payload.videoPath || dfVideoPath;
     if(vidPath && window.forge){
       try {
         const vd = await forge.readFile(vidPath);
-        if(vd && vd.length) setBgVideo(new Uint8Array(vd), baseName(vidPath), vidPath);
+        if(superseded()) return;
+        if(vd && vd.length) setBgVideo(new Uint8Array(vd), baseName(vidPath), vidPath, {loading: true});
       } catch(err){ console.warn('[video] pozadí se nepodařilo načíst:', vidPath, err); }
     }
   }
+  // Stopa „Video audio" bez videa nedává smysl (projekt uložený bez videa) — zahodit.
+  if(!state.bgVideo && state.audio && state.audio.stems.some(x => x.role === 'video')) removeStemRole('video');
   // album art ze složky písničky
   if(state.albumArt && state.albumArt.blobUrl) URL.revokeObjectURL(state.albumArt.blobUrl);
   if(payload.albumPath){
-    state.albumArt = {url: encodeURI('file:///' + payload.albumPath.replace(/\\/g, '/')), name: baseName(payload.albumPath)};
+    state.albumArt = {url: pathToFileUrl(payload.albumPath), name: baseName(payload.albumPath)};
   } else if(payload.sngAlbum){
     const url = URL.createObjectURL(new Blob([payload.sngAlbum]));
     state.albumArt = {data: payload.sngAlbum, url, blobUrl: url, name: 'album.png'};
@@ -7061,12 +7256,12 @@ async function openAudioAction(){
   if(window.forge){
     const r = await forge.openAudio();
     if(!r) return;
-    if(r.error){ alert(r.error); return; }
+    if(r.error){ uiAlert(r.error); return; }
     const stem = await decodeToStem(u8ToArrayBuffer(r.data), r.name);
     if(stem){
       setStemBuffer('song', stem.buffer, r.name, {path: r.path});
       setAudioSource(r.path, r.name);   // zapamatovat přesnou cestu k audiu
-    } else alert('Could not decode audio: ' + r.name);
+    } else uiAlert('Could not decode audio: ' + r.name);
   } else {
     $('fileAudio').click();
   }
@@ -7079,7 +7274,7 @@ async function openBgVideoAction(){
   if(!window.forge || !forge.openVideo) return;      // v prohlížeči zatím ne — chce to <input type="file"> fallback
   const r = await forge.openVideo();
   if(!r) return;                                     // dialog zrušen
-  if(r.error){ alert(r.error); return; }
+  if(r.error){ uiAlert(r.error); return; }
   // Uložit video buffer + jméno + cestu (ta se hodí, kdyby uživatel chtěl soubor později
   // „odpojit i smazat" — u vlastního videa mimo cache to nechceme umožnit, drží se jen původní cesta).
   setBgVideo(r.data, r.name, r.path);
@@ -7090,7 +7285,7 @@ async function saveChartAction(saveAs){
   if(!state.chart) return false;
   let content;
   try { content = serializeChart(state.chart); }
-  catch(err){ alert('Could not serialize the chart: ' + err.message); return false; }
+  catch(err){ uiAlert('Could not serialize the chart: ' + err.message); return false; }
   if(window.forge){
     try {
       if(saveAs || !state.filePath){
@@ -7100,14 +7295,14 @@ async function saveChartAction(saveAs){
         const cur = state.filePath;
         const def = (cur && /\.chart$/i.test(cur)) ? cur
           : cur ? cur.replace(/[^\\/]+$/, 'notes.chart')
-          : (state.songDir ? state.songDir + '\\notes.chart' : 'notes.chart');
+          : (state.songDir ? joinPath(state.songDir, 'notes.chart') : 'notes.chart');
         const res = await forge.saveChartAs(content, def);
         if(!res) return false;                            // uživatel zrušil dialog
-        if(res.error){ alert(res.error); return false; }
+        if(res.error){ uiAlert(res.error); return false; }
         state.filePath = res.path;
       } else {
         const res = await forge.saveChart(state.filePath, content);
-        if(res && res.error){ alert(res.error); return false; }
+        if(res && res.error){ uiAlert(res.error); return false; }
       }
       noteRecent(state.filePath);
       // Vedle .chart zapsat i song.ini, aby se metadata (obtížnost diff_*, preview, icon, playlist…)
@@ -7119,18 +7314,18 @@ async function saveChartAction(saveAs){
         let write = true;
         if(dir !== state.songDir){
           let exists = false;
-          try { const b = await forge.readFile(dir + '\\song.ini'); exists = !!(b && b.length); } catch(e){}
-          if(exists) write = confirm('That folder already has a song.ini.\n\nOverwrite it with this chart’s metadata?');
+          try { const b = await forge.readFile(joinPath(dir, 'song.ini')); exists = !!(b && b.length); } catch(e){}
+          if(exists) write = await uiConfirm('That folder already has a song.ini.\n\nOverwrite it with this chart’s metadata?');
         }
         if(write){
           try {
-            const r = await forge.saveChart(dir + '\\song.ini', buildSongIni());
-            if(r && r.error) alert('The chart was saved, but song.ini could not be written:\n' + r.error);
+            const r = await forge.saveChart(joinPath(dir, 'song.ini'), buildSongIni());
+            if(r && r.error) uiAlert('The chart was saved, but song.ini could not be written:\n' + r.error);
             else state.songDir = dir;
-          } catch(err){ alert('The chart was saved, but song.ini could not be written:\n' + err.message); }
+          } catch(err){ uiAlert('The chart was saved, but song.ini could not be written:\n' + err.message); }
         }
       }
-    } catch(err){ alert('Could not save the chart: ' + err.message); return false; }
+    } catch(err){ uiAlert('Could not save the chart: ' + err.message); return false; }
   } else {
     const blob = new Blob([content], {type:'text/plain'});
     const a = document.createElement('a');
@@ -7145,27 +7340,33 @@ async function saveChartAction(saveAs){
 }
 // Výchozí uložení = projekt ChartStudia (.chartproj). Nese víc než .chart: média, lyrics, vlajky
 // i pozici v editoru. Herní soubory se z projektu pořád dělají exportem.
-async function saveProjectAction(saveAs){
+let _saveInFlight = null;
+function saveProjectAction(saveAs){
+  if(_saveInFlight) return _saveInFlight;          // probíhající uložení se jen připojí, nespustí podruhé
+  _saveInFlight = saveProjectActionImpl(saveAs).finally(() => { _saveInFlight = null; });
+  return _saveInFlight;
+}
+async function saveProjectActionImpl(saveAs){
   if(!state.chart) return false;
-  if(!(window.forge && forge.saveBinary && forge.saveBinaryAs)){ alert('Saving a project needs the desktop app.'); return false; }
+  if(!(window.forge && forge.saveBinary && forge.saveBinaryAs)){ uiAlert('Saving a project needs the desktop app.'); return false; }
   const st = $('stAudio');
   const prev = st ? st.innerHTML : null;
   if(st) st.textContent = 'Saving project…';        // s videem to je desítky MB, ať to nevypadá zaseknutě
   let data;
   try { data = await buildProject(); }
-  catch(err){ if(st) st.innerHTML = prev; alert('Could not build the project: ' + err.message); return false; }
+  catch(err){ if(st) st.innerHTML = prev; uiAlert('Could not build the project: ' + err.message); return false; }
   try {
     if(saveAs || !state.projPath){
-      const def = (state.songDir ? state.songDir + '\\' : '') + exportBaseName() + '.chartproj';
+      const def = state.songDir ? joinPath(state.songDir, exportBaseName() + '.chartproj') : exportBaseName() + '.chartproj';
       const res = await forge.saveBinaryAs(data, state.projPath || def, 'ChartStudio project', 'chartproj');
       if(!res){ if(st) st.innerHTML = prev; return false; }               // uživatel zrušil dialog
-      if(res.error){ if(st) st.innerHTML = prev; alert(res.error); return false; }
+      if(res.error){ if(st) st.innerHTML = prev; uiAlert(res.error); return false; }
       state.projPath = res.path;
     } else {
       const res = await forge.saveBinary(state.projPath, data);
-      if(res && res.error){ if(st) st.innerHTML = prev; alert(res.error); return false; }
+      if(res && res.error){ if(st) st.innerHTML = prev; uiAlert(res.error); return false; }
     }
-  } catch(err){ if(st) st.innerHTML = prev; alert('Could not save the project: ' + err.message); return false; }
+  } catch(err){ if(st) st.innerHTML = prev; uiAlert('Could not save the project: ' + err.message); return false; }
   if(st) st.innerHTML = prev;
   noteRecent(state.projPath);
   state.dirty = false;
@@ -7174,8 +7375,8 @@ async function saveProjectAction(saveAs){
 }
 window.__forgeSave = () => saveProjectAction(false);
 
-function newChartAction(){
-  if(state.chart && state.dirty && !confirm('Discard unsaved changes?')) return;
+async function newChartAction(){
+  if(state.chart && state.dirty && !await uiConfirm('Discard unsaved changes?')) return;
   state.trackName = 'ExpertDrums';
   loadChart(newChart());
   setStems([]); state.audioPath = null;   // nový chart = žádné zděděné audio
@@ -7251,7 +7452,7 @@ function fftRadix2(re, im){
 // který sečte základní dobu i její násobky, takže nespadne na dělení/násobek (oktávová chyba).
 // Vrací BPM v ~[50,210]; jemný log-normální „resonance" prior kolem 110.
 function analyzeTempo(){
-  if(!state.audio){ alert('Load audio first.'); return null; }
+  if(!state.audio){ uiAlert('Load audio first.'); return null; }
   const {data, sr} = mixedMono(120);
   const frame = 1024, hop = 512, half = frame >> 1;
   const nFrames = Math.floor((data.length - frame) / hop);
@@ -7376,53 +7577,65 @@ async function chooseAlbumArt(file){
 
 // ---------- Mix audia + WAV (export s 2s lead-inem) ----------
 // `stemsIn` = volitelný seznam stemů k namixování; jinak se berou všechny nemuted z projektu.
-function buildMixWav(leadSec, stemsIn){
-  let stems = stemsIn || state.audio.stems.filter(s => !s.muted);
-  if(!stems.length) stems = state.audio.stems;           // (vše ztlumené → přesto exportovat vše)
-  const sr = stems[0].buffer.sampleRate;
-  let maxLen = 0; for(const s of stems) maxLen = Math.max(maxLen, s.buffer.length);
-  const lead = Math.round((leadSec == null ? 2 : Math.max(0, leadSec)) * sr);
-  const total = lead + maxLen;
-  const L = new Float32Array(total), R = new Float32Array(total);
-  for(const s of stems){
-    const b = s.buffer, l = b.getChannelData(0), r = b.numberOfChannels > 1 ? b.getChannelData(1) : l;
-    const vol = s.volume == null ? 1 : s.volume;      // hlasitost stemu z Audio dialogu
-    for(let i = 0; i < b.length; i++){ L[lead + i] += l[i] * vol; R[lead + i] += r[i] * vol; }
-  }
-  let peak = 0;
-  for(let i = 0; i < total; i++){ const a = Math.abs(L[i]), c = Math.abs(R[i]); if(a > peak) peak = a; if(c > peak) peak = c; }
-  const gain = peak > 1 ? 0.98 / peak : 1;
-  const bytes = 44 + total * 4;
-  const ab = new ArrayBuffer(bytes), dv = new DataView(ab);
-  const ws = (o, s) => { for(let i = 0; i < s.length; i++) dv.setUint8(o + i, s.charCodeAt(i)); };
-  ws(0, 'RIFF'); dv.setUint32(4, bytes - 8, true); ws(8, 'WAVE'); ws(12, 'fmt '); dv.setUint32(16, 16, true);
-  dv.setUint16(20, 1, true); dv.setUint16(22, 2, true); dv.setUint32(24, sr, true); dv.setUint32(28, sr * 4, true);
-  dv.setUint16(32, 4, true); dv.setUint16(34, 16, true); ws(36, 'data'); dv.setUint32(40, total * 4, true);
-  let o = 44;
-  for(let i = 0; i < total; i++){
-    let lv = Math.max(-1, Math.min(1, L[i] * gain)), rv = Math.max(-1, Math.min(1, R[i] * gain));
-    dv.setInt16(o, lv < 0 ? lv * 0x8000 : lv * 0x7fff, true); o += 2;
-    dv.setInt16(o, rv < 0 ? rv * 0x8000 : rv * 0x7fff, true); o += 2;
-  }
-  return new Uint8Array(ab);
-}
-// Jedna stopa do WAV — s předřazeným tichem (lead) a hlasitostí stemu z Audio dialogu.
-function stemWav(buf, leadSec, vol){
-  const ch = Math.min(2, buf.numberOfChannels), sr = buf.sampleRate;
-  const lead = Math.max(0, Math.round((leadSec || 0) * sr));
-  const n = lead + buf.length, g = vol == null ? 1 : vol;
-  const bytes = 44 + n * ch * 2;
+// Posun stopy v čase (s): „Video audio" žije v čase videa, takže v čase skladby začíná
+// o offset videa jinde. Kladný offset = začátek zvuku videa se ořízne, záporný = zpozdí.
+function stemShiftSec(s){ return s.shiftSec != null ? s.shiftSec : (s.role === 'video' ? videoOffsetSec() : 0); }
+// Hlavička 16bit PCM WAV; data se pak píšou přes Int16Array (ne po vzorku přes DataView —
+// to u devíti stop Everlongu drželo UI zamrzlé 3,3 s).
+function wavBuffer(frames, ch, sr){
+  const bytes = 44 + frames * ch * 2;
   const ab = new ArrayBuffer(bytes), dv = new DataView(ab);
   const ws = (o, s) => { for(let i = 0; i < s.length; i++) dv.setUint8(o + i, s.charCodeAt(i)); };
   ws(0, 'RIFF'); dv.setUint32(4, bytes - 8, true); ws(8, 'WAVE'); ws(12, 'fmt '); dv.setUint32(16, 16, true);
   dv.setUint16(20, 1, true); dv.setUint16(22, ch, true); dv.setUint32(24, sr, true);
   dv.setUint32(28, sr * ch * 2, true); dv.setUint16(32, ch * 2, true); dv.setUint16(34, 16, true);
-  ws(36, 'data'); dv.setUint32(40, n * ch * 2, true);
+  ws(36, 'data'); dv.setUint32(40, frames * ch * 2, true);
+  return {ab, pcm: new Int16Array(ab, 44, frames * ch)};   // WAV je little-endian = stejně jako x86/ARM
+}
+function buildMixWav(leadSec, stemsIn){
+  let stems = stemsIn || state.audio.stems.filter(s => !s.muted);
+  if(!stems.length) stems = state.audio.stems;           // (vše ztlumené → přesto exportovat vše)
+  const sr = stems[0].buffer.sampleRate;
+  const lead = Math.round((leadSec == null ? 2 : Math.max(0, leadSec)) * sr);
+  // posun každé stopy ve vzorcích (dst = lead + src - shift)
+  const shifts = stems.map(s => Math.round(stemShiftSec(s) * sr));
+  let total = lead;
+  stems.forEach((s, k) => { total = Math.max(total, lead + s.buffer.length - shifts[k]); });
+  const L = new Float32Array(total), R = new Float32Array(total);
+  stems.forEach((s, k) => {
+    const b = s.buffer, l = b.getChannelData(0), r = b.numberOfChannels > 1 ? b.getChannelData(1) : l;
+    const vol = s.volume == null ? 1 : s.volume;      // hlasitost stemu z Audio dialogu
+    const off = lead - shifts[k];
+    const i0 = Math.max(0, -off), i1 = Math.min(b.length, total - off);
+    for(let i = i0; i < i1; i++){ L[off + i] += l[i] * vol; R[off + i] += r[i] * vol; }
+  });
+  let peak = 0;
+  for(let i = 0; i < total; i++){ const a = Math.abs(L[i]), c = Math.abs(R[i]); if(a > peak) peak = a; if(c > peak) peak = c; }
+  const gain = peak > 1 ? 0.98 / peak : 1;
+  const {ab, pcm} = wavBuffer(total, 2, sr);
+  for(let i = 0, o = 0; i < total; i++, o += 2){
+    let lv = L[i] * gain, rv = R[i] * gain;
+    lv = lv > 1 ? 1 : lv < -1 ? -1 : lv; rv = rv > 1 ? 1 : rv < -1 ? -1 : rv;
+    pcm[o] = lv < 0 ? lv * 0x8000 : lv * 0x7fff;
+    pcm[o + 1] = rv < 0 ? rv * 0x8000 : rv * 0x7fff;
+  }
+  return new Uint8Array(ab);
+}
+// Jedna stopa do WAV — s předřazeným tichem (lead), hlasitostí stemu a případným posunem (shiftSec).
+function stemWav(buf, leadSec, vol, shiftSec){
+  const ch = Math.min(2, buf.numberOfChannels), sr = buf.sampleRate;
+  const lead = Math.max(0, Math.round((leadSec || 0) * sr));
+  const off = lead - Math.round((shiftSec || 0) * sr);       // kam padne vzorek 0 stopy
+  const n = Math.max(lead, off + buf.length), g = vol == null ? 1 : vol;
+  const {ab, pcm} = wavBuffer(n, ch, sr);
   const chans = []; for(let c = 0; c < ch; c++) chans.push(buf.getChannelData(c));
-  let o = 44 + lead * ch * 2;
-  for(let i = 0; i < buf.length; i++) for(let c = 0; c < ch; c++){
-    const v = clamp(chans[c][i] * g, -1, 1);
-    dv.setInt16(o, v < 0 ? v * 0x8000 : v * 0x7fff, true); o += 2;
+  const i0 = Math.max(0, -off), i1 = Math.min(buf.length, n - off);
+  for(let c = 0; c < ch; c++){
+    const src = chans[c];
+    for(let i = i0, o = (off + i0) * ch + c; i < i1; i++, o += ch){
+      let v = src[i] * g; v = v > 1 ? 1 : v < -1 ? -1 : v;
+      pcm[o] = v < 0 ? v * 0x8000 : v * 0x7fff;
+    }
   }
   return new Uint8Array(ab);
 }
@@ -7440,7 +7653,7 @@ async function buildExportAudio(lead){
   // a video se do exportu nezapisuje samostatně — ať se v `song.wav` neduplikuje.
   const hasRealSong = stems.some(s => s.role === 'song');
   if(!hasRealSong){
-    stems = stems.map(s => s.role === 'video' ? {...s, role: 'song'} : s);
+    stems = stems.map(s => s.role === 'video' ? {...s, role: 'song', shiftSec: videoOffsetSec()} : s);   // posun videa jde s ním
   } else {
     // Song i Video najednou → sloučit do jednoho song.wav, ať se zvuk videa dostane do mixu
     // a Clone Hero ho přehraje. Zachováme ostatní instrumentální stemy zvlášť (guitar/bass/…),
@@ -7465,7 +7678,7 @@ async function buildExportAudio(lead){
           const raw = s.bytes && s.bytes.length ? s.bytes : await readFileBytes(s.path);
           if(raw){ out.push({name: base + '.' + ext.toLowerCase(), data: raw}); continue; }
         }
-        out.push({name: base + '.wav', data: stemWav(s.buffer, lead, vol)});
+        out.push({name: base + '.wav', data: stemWav(s.buffer, lead, vol, stemShiftSec(s))});
       }
       return out;
     }
@@ -7483,7 +7696,7 @@ async function buildExportAudio(lead){
       const raw = s.bytes && s.bytes.length ? s.bytes : await readFileBytes(s.path);
       if(raw){ out.push({name: base + '.' + ext.toLowerCase(), data: raw}); continue; }
     }
-    out.push({name: base + '.wav', data: stemWav(s.buffer, lead, vol)});
+    out.push({name: base + '.wav', data: stemWav(s.buffer, lead, vol, stemShiftSec(s))});
   }
   return out;
 }
@@ -7596,13 +7809,16 @@ async function buildExportFiles(){
   if(audioFiles.length) setSongValIn(clone, 'MusicStream', audioFiles[0].name, true);
   const files = [{name: 'notes.chart', data: serializeChart(clone)}, {name: 'song.ini', data: buildSongIni(lead)}];
   for(const f of audioFiles) files.push(f);
-  if(state.bgVideo && state.bgVideo.data) files.push({name: 'video.mp4', data: state.bgVideo.data});   // pozadí za highwayí
+  if(state.bgVideo && state.bgVideo.data){                                       // pozadí za highwayí
+    const vext = ((state.bgVideo.name || '').match(/\.(mp4|webm|mov|avi|mkv|mpe?g)$/i) || [, 'mp4'])[1].toLowerCase();
+    files.push({name: 'video.' + vext, data: state.bgVideo.data});
+  }
   if(state.albumArt && state.albumArt.data){
     files.push({name: state.albumArt.name || 'album.png', data: state.albumArt.data});
   } else if(state.albumArt && !state.albumArt.removed && state.albumArt.url && state.albumArt.url.startsWith('file:') && window.forge && forge.readFile){
     // album načtený z disku (nemá bajty v paměti) → dočíst, ať se přibalí i při re-exportu
     try {
-      const p = decodeURIComponent(state.albumArt.url.replace(/^file:\/+/, ''));
+      const p = fileUrlToPath(state.albumArt.url);
       const buf = await forge.readFile(p);
       if(buf && buf.length) files.push({name: state.albumArt.name || 'album.png', data: new Uint8Array(buf)});
     } catch(err){ console.warn('album read for export failed', err); }
@@ -7613,15 +7829,15 @@ async function buildExportFiles(){
 // baseDir = přednastavená cílová složka (null → main proces se zeptá dialogem)
 async function doExportCH(baseDir, folderNameOverride){
   if(!state.chart){ return; }
-  if(!state.audio && !confirm('No audio is loaded. Export the chart with a +2s offset anyway?')) return;
+  if(!state.audio && !await uiConfirm('No audio is loaded. Export the chart with a +2s offset anyway?')) return;
   const {files, clone, lead} = await buildExportFiles();
   if(window.forge && forge.exportSong){
     const folderName = (folderNameOverride || '').trim() || defaultFolderName();
     let dir;
     try { dir = await forge.exportSong(files, folderName, baseDir || null); }
-    catch(err){ alert('Export failed: ' + err.message); return; }
-    if(dir && dir.error){ alert(dir.error); return; }   // chyba zápisu složky
-    if(dir) alert('Exported Clone Hero song to:\n' + dir + (lead > 0.01 ? '\n\nAdded a ' + lead.toFixed(1) + ' s lead-in of silence so the first note is ~2 s in.' : '\n\nThe chart already starts with a lead-in.'));
+    catch(err){ uiAlert('Export failed: ' + err.message); return; }
+    if(dir && dir.error){ uiAlert(dir.error); return; }   // chyba zápisu složky
+    if(dir) uiAlert('Exported Clone Hero song to:\n' + dir + (lead > 0.01 ? '\n\nAdded a ' + lead.toFixed(1) + ' s lead-in of silence so the first note is ~2 s in.' : '\n\nThe chart already starts with a lead-in.'));
   } else {
     const blob = new Blob([serializeChart(clone)], {type: 'text/plain'});
     const a = document.createElement('a'); a.href = URL.createObjectURL(blob); a.download = 'notes.chart'; a.click();
@@ -7683,18 +7899,18 @@ async function doExportMid(){
   if(!state.chart) return;
   let data;
   try { data = chartToMidi(state.chart); }
-  catch(err){ alert('Could not build the MIDI file: ' + err.message); return; }
+  catch(err){ uiAlert('Could not build the MIDI file: ' + err.message); return; }
   if(!window.forge || !forge.saveBinaryAs){
     const a = document.createElement('a'); a.href = URL.createObjectURL(new Blob([data])); a.download = 'notes.mid'; a.click();
     setTimeout(() => URL.revokeObjectURL(a.href), 5000); return;
   }
-  const res = await forge.saveBinaryAs(data, (state.songDir ? state.songDir + '\\' : '') + 'notes.mid', 'MIDI file', 'mid');
-  if(res && res.error) alert(res.error);
+  const res = await forge.saveBinaryAs(data, (state.songDir ? joinPath(state.songDir, 'notes.mid') : 'notes.mid'), 'MIDI file', 'mid');
+  if(res && res.error) uiAlert(res.error);
   else if(res){
     // .mid formát nemá kam uložit Offset — v Clone Hero to řeší `delay` v song.ini. Bez upozornění
     // by uživatel dostal soubor, který je o tu hodnotu mimo, a nikde by to nebylo vidět.
     const off = getOffset();
-    alert('Saved MIDI:\n' + res.path + (Math.abs(off) > 0.0005
+    uiAlert('Saved MIDI:\n' + res.path + (Math.abs(off) > 0.0005
       ? '\n\nHeads up: this chart has an Offset of ' + off.toFixed(3) + ' s and the .mid format has'
         + ' nowhere to store it. Put "delay = ' + Math.round(off * 1000) + '" into song.ini,'
         + ' otherwise the song will play out of sync.'
@@ -7703,7 +7919,7 @@ async function doExportMid(){
 }
 async function doExportSng(){
   if(!state.chart) return;
-  if(!state.audio && !confirm('No audio is loaded. Build the .sng anyway?')) return;
+  if(!state.audio && !await uiConfirm('No audio is loaded. Build the .sng anyway?')) return;
   const {files, lead} = await buildExportFiles();
   // song.ini se do .sng nepřikládá jako soubor — jeho klíče jsou samostatná sekce metadat
   const ini = files.find(f => f.name === 'song.ini');
@@ -7715,14 +7931,14 @@ async function doExportSng(){
   const payload = files.filter(f => f.name !== 'song.ini');
   let data;
   try { data = buildSng(payload, pairs); }
-  catch(err){ alert('Could not build the .sng file: ' + err.message); return; }
+  catch(err){ uiAlert('Could not build the .sng file: ' + err.message); return; }
   if(!window.forge || !forge.saveBinaryAs){
     const a = document.createElement('a'); a.href = URL.createObjectURL(new Blob([data])); a.download = 'song.sng'; a.click();
     setTimeout(() => URL.revokeObjectURL(a.href), 5000); return;
   }
   const res = await forge.saveBinaryAs(data, exportBaseName() + '.sng', 'Clone Hero song package', 'sng');
-  if(res && res.error) alert(res.error);
-  else if(res) alert('Saved .sng:\n' + res.path + (lead > 0.01 ? '\n\nAdded a ' + lead.toFixed(1) + ' s lead-in of silence.' : ''));
+  if(res && res.error) uiAlert(res.error);
+  else if(res) uiAlert('Saved .sng:\n' + res.path + (lead > 0.01 ? '\n\nAdded a ' + lead.toFixed(1) + ' s lead-in of silence.' : ''));
 }
 // nápověda v dialogu exportu: ukázat výslednou cestu, nebo že se cíl vybere až při exportu
 function updateExpHint(){
@@ -7838,7 +8054,7 @@ $('fileChart').addEventListener('change', async e => {
   const f = e.target.files[0]; if(!f) return;
   if(/\.midi?$/i.test(f.name)){
     const u8 = new Uint8Array(await f.arrayBuffer());
-    try { loadChart(midiToChart(u8)); } catch(err){ alert('Could not parse MIDI: ' + err.message); return; }
+    try { loadChart(midiToChart(u8)); } catch(err){ uiAlert('Could not parse MIDI: ' + err.message); return; }
   } else {
     loadChart(parseChart(await f.text()));
   }
@@ -8021,13 +8237,21 @@ function renderAudioList(){
     list.appendChild(row);
   }
 }
+// Řádky dialogu Audio drží v posluchačích odkazy na stopy (AudioBuffer = stovky MB). Po výměně
+// stop by zavřený dialog dál držel v paměti audio PŘEDCHOZÍ písničky — naměřeno ~900 MB navíc
+// po každém přepnutí projektu. Otevřený dialog se překreslí, zavřený se vyprázdní.
+function dropStaleAudioRows(){
+  const list = $('audioList'), dlg = $('audioDlg');
+  if(!list) return;
+  if(dlg && dlg.open) queueMicrotask(renderAudioList); else list.textContent = '';
+}
 function openAudioDialog(){ if(!state.chart) return; renderAudioList(); showDialog($('audioDlg'), null); }
 async function loadStemForRole(role){
   if(window.forge && forge.openAudio){
     const r = await forge.openAudio();
-    if(!r) return; if(r.error){ alert(r.error); return; }
+    if(!r) return; if(r.error){ uiAlert(r.error); return; }
     const stem = await decodeToStem(u8ToArrayBuffer(r.data), r.name);
-    if(!stem){ alert('Could not decode audio: ' + r.name); return; }
+    if(!stem){ uiAlert('Could not decode audio: ' + r.name); return; }
     setStemBuffer(role, stem.buffer, r.name, {path: r.path});
     if(role === 'song') setAudioSource(r.path, r.name);
     renderAudioList();
@@ -8042,22 +8266,24 @@ async function loadStemForRole(role){
 // do `state.bgVideo.data` a předáme kopii bufferu, protože decode ho zkonzumuje.
 async function loadVideoAudioStem(){
   const v = state.bgVideo;
-  if(!v || !v.data){ alert('Load a background video first (File → Load background video…).'); return; }
+  if(!v || !v.data){ uiAlert('Load a background video first (File → Load background video…).'); return; }
   const setS = msg => { const el = $('audioStatus'); if(el) el.textContent = msg || ''; };
   setS('Decoding audio from video…');
   try {
     // Kopie: decodeAudioData vezme ownership přes transfer — bez slice() by se `state.bgVideo.data`
     // po dekódu stal detached ArrayBuffer a video pozadí by pak nešlo znovu vytvořit (Blob).
     const copy = v.data.slice().buffer;
+    const gen = _bgVidGen;
     const stem = await decodeToStem(copy, v.name || 'video.mp4');
-    if(!stem){ setS(''); alert('Could not decode audio from this video. Some containers (fragmented DASH) have no readable audio stream — try a different file, or export the audio separately.'); return; }
+    if(gen !== _bgVidGen || state.bgVideo !== v){ setS(''); return; }   // video se mezitím změnilo
+    if(!stem){ setS(''); uiAlert('Could not decode audio from this video. Some containers (fragmented DASH) have no readable audio stream — try a different file, or export the audio separately.'); return; }
     setStemBuffer('video', stem.buffer, (v.name || 'video.mp4') + ' (audio)', {});
     setS('Video audio loaded ✓');
     setTimeout(() => setS(''), 1500);
     renderAudioList();
   } catch(err){
     setS('');
-    alert('Could not decode audio from this video: ' + (err && err.message || err));
+    uiAlert('Could not decode audio from this video: ' + (err && err.message || err));
   }
 }
 if($('audioClose')) $('audioClose').addEventListener('click', () => $('audioDlg').close());
@@ -8077,11 +8303,11 @@ $('rngHwLen').addEventListener('input', e => {
   localStorage.setItem('cf-hwlen', String(state.hwLen));
 });
 $('btnTap').addEventListener('click', () => { tapTempo(); $('btnTap').blur(); });
-$('btnAnalyze').addEventListener('click', () => {
+$('btnAnalyze').addEventListener('click', async () => {
   const bpm = analyzeTempo();
   if(!bpm){ return; }
   $('inBpm').value = bpm;
-  if(confirm('Detected tempo: ' + bpm + ' BPM.\n\nApply as the song BPM (at tick 0)?')){
+  if(await uiConfirm('Detected tempo: ' + bpm + ' BPM.\n\nApply as the song BPM (at tick 0)?')){
     const before = snapshot();
     const b0 = state.chart.syncTrack.find(e => e.kind === 'B' && e.tick === 0);
     if(b0) b0.bpm = bpm; else state.chart.syncTrack.push({tick:0, kind:'B', bpm});
@@ -8225,12 +8451,12 @@ $('btnSectionDel').addEventListener('click', () => {
   flashBtn('btnSectionDel', ok, '✓', '·', '✕');
 });
 $('inSection').addEventListener('keydown', e => { if(e.key === 'Enter'){ e.preventDefault(); $('btnSection').click(); } });
-$('btnFlagClearAll').addEventListener('click', () => {
+$('btnFlagClearAll').addEventListener('click', async () => {
   const sec = markerType === 'section';                       // maže se to, co je právě přepnuté nahoře
   const label = clearAllLabel();
   const count = (sec ? getSections() : getAnnotations()).length;
   if(!count){ flashBtn('btnFlagClearAll', false, '', sec ? 'no sections' : 'no flags', label); return; }
-  if(!confirm('Delete all ' + count + (sec ? ' section' : ' note flag') + (count > 1 ? 's' : '') + '? (Ctrl+Z undoes it.)')) return;
+  if(!await uiConfirm('Delete all ' + count + (sec ? ' section' : ' note flag') + (count > 1 ? 's' : '') + '? (Ctrl+Z undoes it.)')) return;
   const n = sec ? clearAllSections() : clearAllAnnotations();
   flashBtn('btnFlagClearAll', true, 'Cleared ' + n, '', label);
 });
@@ -8498,7 +8724,7 @@ function reduceForDiff(src, dstDiff, drums, res){
   return {notes, markers};
 }
 $('diffCancel').addEventListener('click', () => $('diffDlg').close());
-$('diffGo').addEventListener('click', () => {
+$('diffGo').addEventListener('click', async () => {
   const cur = parseTrackName(state.trackName);
   const srcName = $('diffSrc').value + cur.suffix, dstName = $('diffDst').value + cur.suffix;
   const mode = document.querySelector('input[name="diffMode"]:checked').value;
@@ -8506,7 +8732,7 @@ $('diffGo').addEventListener('click', () => {
   const src = state.chart.tracks[srcName];
   if(!src || !src.notes.length){ $('diffHint').textContent = srcName + ' has no notes to copy.'; return; }
   const dst = state.chart.tracks[dstName];
-  if(dst && dst.notes.length && !confirm(dstName + ' already has ' + dst.notes.length + ' notes. Replace them?')) return;
+  if(dst && dst.notes.length && !await uiConfirm(dstName + ' already has ' + dst.notes.length + ' notes. Replace them?')) return;
   const before = snapshot();
   const drums = /Drums$/.test(srcName);
   let out;
@@ -8528,7 +8754,7 @@ $('btnDiffs').addEventListener('click', openDiffDialog);
 // Smazat obtížnost aktuálního nástroje (Expert bicích nechá bicí Hard/Medium/Easy i celou kytaru).
 // Když je to poslední existující obtížnost nástroje, zůstane po ní prázdná stopa — editor tak má
 // pořád kam kreslit a do .chart se prázdná stopa stejně nezapisuje, takže výsledek je stejný.
-function deleteDifficultyAction(){
+async function deleteDifficultyAction(){
   if(!state.chart) return;
   const cur = parseTrackName(state.trackName);
   const name = state.trackName;
@@ -8539,7 +8765,7 @@ function deleteDifficultyAction(){
     return;
   }
   const n = tr.notes.length;
-  if(!confirm('Delete ' + cur.diff + ' of this instrument (' + n + (n === 1 ? ' note' : ' notes') + ')?\n\nCtrl+Z brings it back.')) return;
+  if(!await uiConfirm('Delete ' + cur.diff + ' of this instrument (' + n + (n === 1 ? ' note' : ' notes') + ')?\n\nCtrl+Z brings it back.')) return;
   const before = snapshot();
   delete state.chart.tracks[name];
   const left = DIFFS.filter(d => d !== cur.diff && state.chart.tracks[d + cur.suffix]);
@@ -8607,12 +8833,12 @@ $('notaImport').addEventListener('click', () => {
   };
   const res = importNotation(state.notaMidi, opts);
   $('notaDlg').close();
-  alert('Imported ' + res.count + ' notes into ' + opts.track + '.');
+  uiAlert('Imported ' + res.count + ' notes into ' + opts.track + '.');
 });
 
 // ---------- YouTube audio (vlož odkaz → yt-dlp stáhne a převede) ----------
 $('btnYt').addEventListener('click', () => {
-  if(!window.forge){ alert('Downloading from a URL works in the desktop app.'); return; }
+  if(!window.forge){ uiAlert('Downloading from a URL works in the desktop app.'); return; }
   $('ytStatus').textContent = '';
   refreshYtCache();
   refreshYtDlpStatus();                     // stav yt-dlp: verze + věk + (v PATH / vlastní)
@@ -8627,7 +8853,7 @@ async function refreshYtDlpStatus(){
   el.textContent = 'yt-dlp: checking…';
   btn.disabled = true;
   let s;
-  try { s = await forge.ytStatus(); } catch(err){ el.textContent = 'yt-dlp: not available'; return; }
+  try { s = await forge.ytStatus(); } catch(err){ el.textContent = 'yt-dlp: not available'; btn.disabled = false; return; }
   if(!s || !s.installed){
     el.textContent = 'yt-dlp: not installed';
     el.style.color = 'var(--accent2)';
@@ -8655,9 +8881,11 @@ $('ytDlpUpdate').addEventListener('click', async () => {
   const before = btn.textContent;
   btn.textContent = 'Downloading…';
   st.textContent = 'Downloading the latest yt-dlp from GitHub…';
-  const r = await forge.ytUpdate();
-  if(r && r.error){
-    st.textContent = 'Update failed: ' + r.error;
+  let r;
+  try { r = await forge.ytUpdate(); }
+  catch(err){ r = {error: (err && err.message) || String(err)}; }
+  if(!r || r.error){
+    st.textContent = 'Update failed: ' + ((r && r.error) || 'unknown error');
     btn.textContent = before;
     btn.disabled = false;
     return;
@@ -8686,32 +8914,39 @@ async function refreshYtCache(){
 $('ytCacheClear').addEventListener('click', async () => {
   const i = await forge.ytCacheInfo();
   if(!i.count) return;
-  if(!confirm('Delete ' + i.count + ' downloaded file(s) (' + fmtMB(i.bytes) + ')?\n\n'
+  if(!await uiConfirm('Delete ' + i.count + ' downloaded file(s) (' + fmtMB(i.bytes) + ')?\n\n'
     + 'The file used by the project you have open is kept.\nOther saved charts will lose the link to their audio '
     + '— you would have to download it again.')) return;
   const r = await forge.ytCacheClear(state.audioPath || null);
-  if(r && r.error){ alert(r.error); return; }
+  if(r && r.error){ uiAlert(r.error); return; }
   await refreshYtCache();
   $('ytStatus').textContent = 'Freed ' + fmtMB(r.bytes) + ' (' + r.removed + ' file'
     + (r.removed === 1 ? '' : 's') + ' deleted' + (r.kept ? ', ' + r.kept + ' in use kept' : '') + ').';
 });
 // background video písničky (Clone Hero přehrává video.* ze složky písničky za highwayí)
 // path = odkud se video stáhlo (mezipaměť) — jen kvůli možnosti smazat i soubor, ne jen odkaz
-function setBgVideo(data, name, path){
+// opts.loading = volá se z načítání projektu: stopu „Video audio" nemazat (patří k tomuhle
+// videu) a nehlásit neuložené změny.
+function setBgVideo(data, name, path, opts){
+  const loading = !!(opts && opts.loading);
+  const had = !!state.bgVideo;
   state.bgVideo = data ? {data, name: name || 'video.mp4', path: path || null} : null;
+  _bgVidGen++;                         // rozběhnutý dekód audia ze starého videa se zahodí
   releaseBgVideo();                    // staré video na pozadí zahodit (jiná písnička / odebráno)
   // Když se video mění nebo mizí, „Video audio" stem už neplatí (patřil starému videu).
   // Uživatel ho případně natáhne znovu z nového; automaticky to neděláme, ať do mixu
   // netaháme překryté audio bez ptaní.
-  if(state.audio && state.audio.stems.some(x => x.role === 'video')){
+  if(!loading && state.audio && state.audio.stems.some(x => x.role === 'video')){
     removeStemRole('video');
     if($('audioDlg') && $('audioDlg').open) renderAudioList();
   }
   // stejně jako u audia (DFAudioPath): zapamatovat cestu, ať video najde i holý .chart
   if(state.chart) setSongVal('DFVideoPath', (data && path) ? path : '', true);
   refreshYtMedia();
-  if(data) markDirty();
+  // i odpojení videa je změna projektu — dřív šlo aplikaci zavřít bez dotazu a video v projektu zůstalo
+  if(!loading && (data || had)) markDirty();
 }
+var _bgVidGen = 0;
 $('ytClose').addEventListener('click', () => $('ytDlg').close());
 // Řádky médií: ✕ Detach = odpojit od projektu (soubor zůstane), 🗑 Delete file = smazat i data.
 let _ytDir = null;                                   // složka mezipaměti (zjištěná z ytCacheInfo)
@@ -8733,10 +8968,10 @@ function refreshYtMedia(){
 // společné pro obě tlačítka 🗑
 async function deleteMediaFile(p, what, afterDetach){
   if(!p || !window.forge || !forge.ytDeleteFile) return;
-  if(!confirm('Delete the downloaded ' + what + ' file from disk?\n\n' + p
+  if(!await uiConfirm('Delete the downloaded ' + what + ' file from disk?\n\n' + p
     + '\n\nIt is removed from this project too. Charts that reference it will lose it.')) return;
   const r = await forge.ytDeleteFile(p);
-  if(r && r.error){ alert(r.error); return; }
+  if(r && r.error){ uiAlert(r.error); return; }
   afterDetach();
   await refreshYtCache();
   refreshYtMedia();
@@ -8791,17 +9026,23 @@ function ytReportError(msg){
     setS(msg);
   }
 }
+let _ytBusy = false;
 async function ytGrab(url){
   const setS = s => { $('ytStatus').textContent = s; };
+  if(_ytBusy) return false;
   if(!YT_URL_RE.test(url)){ setS('That does not look like a valid link (it must start with http).'); return false; }
   const wantVideo = ytKind === 'video';
   const btns = [$('ytUse')];
+  const chart0 = state.chart;
+  const stale = () => state.chart !== chart0;     // mezitím otevřená jiná písnička
+  _ytBusy = true;
   btns.forEach(b => b.disabled = true);
   try {
     const ok = await forge.ytEnsure();
     if(ok.error){ ytReportError(ok.error); return false; }
     const r = await forge.ytDownload(url, 'audio');
     if(r.error){ ytReportError(r.error); return false; }
+    if(stale()){ setS('Another song was opened during the download — the file is in the cache, nothing was changed.'); return false; }
     const stem = await decodeToStem(u8ToArrayBuffer(r.data), r.name);
     if(!stem){ setS('Could not decode the downloaded audio.'); return false; }
     setStemBuffer('song', stem.buffer, r.name, {path: r.path || null});
@@ -8810,11 +9051,16 @@ async function ytGrab(url){
     setS('Audio ✓ — downloading the video…');
     const v = await forge.ytDownload(url, 'video');
     if(v.error){ ytReportError('Audio ✓ · video failed: ' + v.error); return true; }   // audio máme, video je bonus
+    if(stale()){ setS('Another song was opened during the download — the video was not attached.'); return true; }
     setBgVideo(v.data, v.name, v.path || null);
     setS('Audio ✓ · background video ✓');
     setTimeout(() => $('ytDlg').close(), 1200);
     return true;
+  } catch(err){
+    ytReportError((err && err.message) || String(err));   // dřív nezachycená výjimka = žádná hláška
+    return false;
   } finally {
+    _ytBusy = false;
     btns.forEach(b => b.disabled = false);
   }
 }
@@ -8920,19 +9166,18 @@ $('mVideoClear').addEventListener('click', () => {
   refreshVideoSection();
 });
 $('mVideoSyncHere').addEventListener('click', () => {
-  // „Nastav offset tak, aby AKTUÁLNÍ snímek videa hrál v AKTUÁLNÍM čase skladby."
-  //  offset[s] = videoTime - songTime  →  songTime + offset = videoTime  (přesně sync rovnice v syncBgVideo)
-  const b = _bgVid && _bgVid.el;
-  if(!b){ alert('Play or scrub the highway once so the video preview activates, then try again.'); return; }
-  const vt = b.currentTime;
-  const st = tickToTime(state.scrollTick);
-  setVideoOffsetMs(Math.round((vt - st) * 1000));
+  // „Video začíná TADY": první snímek videa připadne na aktuální pozici playheadu.
+  // Rovnice ze syncBgVideo: čas videa = čas audia + offset → 0 = audio(playhead) + offset.
+  // (Dřívější „Sync at playhead" četl čas videa, který si sync sám nastavil na playhead + offset,
+  //  takže vždy vrátil stávající offset — tlačítko nic nedělalo.)
+  const audioT = tickToTime(state.scrollTick) + getOffset();
+  setVideoOffsetMs(Math.round(-audioT * 1000));
 });
 // preview úryvku: From playhead = aktuální pozice (v čase audia), ▶ Try = 15s přehrání od preview startu
 $('mPreviewSet').addEventListener('click', () => {
   $('mPreview').value = String(+Math.max(0, tickToTime(state.scrollTick) + getOffset()).toFixed(2));
 });
-let _previewTimer = null;
+var _previewTimer = null;
 $('mPreviewPlay').addEventListener('click', () => {
   const s = parseFloat($('mPreview').value);
   if(!Number.isFinite(s) || s < 0){ return; }
@@ -8969,6 +9214,7 @@ function renderDiffFields(){
 }
 $('mCancel').addEventListener('click', () => $('metaDlg').close());
 $('mSave').addEventListener('click', async () => {
+  const before = state.chart ? snapshot() : null;
   setSongVal('Name', $('mName').value, true);
   setSongVal('Artist', $('mArtist').value, true);
   setSongVal('Charter', $('mCharter').value, true);
@@ -8996,6 +9242,7 @@ $('mSave').addEventListener('click', async () => {
       else state.albumArt.dirty = false;
     } catch(err){ console.warn('album save failed', err); }
   }
+  if(before) pushUndo(before);
   markDirty();
   refreshTitle();
   $('metaDlg').close();
@@ -9175,6 +9422,9 @@ function runMenuAction(action){
   else if(action === 'export') startExportCH();
   else if(action === 'exportmid') doExportMid();
   else if(action === 'exportsng') doExportSng();
+  else if(action === 'copy-sel') copySelection(false);
+  else if(action === 'cut-sel') copySelection(true);
+  else if(action === 'paste-sel') pasteClipboard();
   else if(action === 'undo') undo();
   else if(action === 'redo') redo();
   else if(action === 'view3d') cycleView();
@@ -9367,6 +9617,15 @@ if(window.forge){
 }
 
 // drag & drop: složka písničky / .chart / .mid / audio
+// .webm může být jen zvuk (přesně to stahuje i naše „Audio only"). Video stopa má v EBML
+// hlavičce element Video (0xE0) v TrackEntry — stačí se podívat do prvních 64 kB.
+async function webmHasVideo(f){
+  try {
+    const u = new Uint8Array(await f.slice(0, 65536).arrayBuffer());
+    for(let i = 0; i < u.length - 1; i++){ if(u[i] === 0x83 && u[i + 1] === 0x81 && u[i + 2] === 0x01) return true; }   // TrackType = 1 (video)
+    return false;
+  } catch(e){ return true; }
+}
 window.addEventListener('dragover', e => { e.preventDefault(); document.body.classList.add('dragging'); });
 window.addEventListener('dragleave', e => { if(!e.relatedTarget) document.body.classList.remove('dragging'); });
 window.addEventListener('drop', async e => {
@@ -9382,13 +9641,13 @@ window.addEventListener('drop', async e => {
     if(/\.(ogg|opus|mp3|wav|flac|m4a)$/i.test(f.name) || f.type.startsWith('audio/')){ await loadAudioFile(f); continue; }
     // Background video přetažením: video/* MIME OR jedna z přípon, které bere i main.js (VIDEO_EXTS).
     // Buffer čteme přímo z File — Electronové IPC by tady nic nepřidalo (nepotřebujeme cestu k .path).
-    if(/\.(mp4|webm|mov|avi|mpe?g|mkv)$/i.test(f.name) || f.type.startsWith('video/')){
+    if((/\.(mp4|webm|mov|avi|mpe?g|mkv)$/i.test(f.name) || f.type.startsWith('video/')) && !(/\.webm$/i.test(f.name) && !(await webmHasVideo(f)))){
       try {
         const data = new Uint8Array(await f.arrayBuffer());
         const path = window.forge && forge.pathForFile ? forge.pathForFile(f) : null;
         setBgVideo(data, f.name, path);
         if(state.bg3d !== 'video') setBg3d('video');
-      } catch(err){ alert('Could not load video: ' + err.message); }
+      } catch(err){ uiAlert('Could not load video: ' + err.message); }
       continue;
     }
     if(window.forge){                                             // složka písničky / ostatní přes hostitele
@@ -9428,6 +9687,8 @@ document.addEventListener('change', e => {
 });
 
 // ---------- Start ----------
+// až PO hlavním mousemove handleru plátna — vidí aktualizovaný hover (viz checkHoverChanged)
+cv.addEventListener('mousemove', checkHoverChanged);
 resize();
 loadBuiltinAssets();
 $('rngHwLen').value = state.hwLen;

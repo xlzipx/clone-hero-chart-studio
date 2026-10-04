@@ -49,6 +49,17 @@ const SMOKE_YT = process.argv.includes('--ytcheck');
 
 let win = null;
 let forceClose = false;
+// Probíhá ukončení celé aplikace (⌘Q, menu Quit, zavření posledního okna) — viz close handler.
+let quitting = false;
+app.on('before-quit', () => { quitting = true; });
+// Vrátit oknu vstup po nativním dialogu. Na Windows se po zavření nativního dialogu okno
+// tváří jako aktivní, ale webContents nepřijímá klávesy (a někdy ani kliky), dokud ho uživatel
+// znovu neaktivuje Alt+Tabem. Samotné win.focus() na „už aktivním" okně nic neudělá —
+// blur()+focus() je programový Alt+Tab.
+function refocusWin(){
+  if(!win || win.isDestroyed()) return;
+  try { if(process.platform === 'win32') win.blur(); win.focus(); win.webContents.focus(); } catch(e){}
+}
 
 // Výchozí velikost okna je odvozená z toho, co UI reálně potřebuje: poslední panel v sidebaru končí
 // těsně nad stavovým řádkem — bez posuvníku a bez velké mezery. Čísla jsou změřená v rendereru,
@@ -162,30 +173,45 @@ function createWindow(){
   win.webContents.on('did-finish-load', () => { try { win.webContents.setZoomFactor(1.0); } catch(e){} });
   win.loadFile(path.join(__dirname, 'renderer', 'index.html'));
 
-  // Neuložené změny: zeptat se před zavřením
+  // Neuložené změny: zeptat se před zavřením.
+  // - Dialog je ASYNCHRONNÍ: synchronní varianta blokovala celé UI vlákno hlavního procesu.
+  // - Dotaz do rendereru má časový limit: kdyby renderer visel, okno by nešlo zavřít vůbec.
+  // - Na macOS přichází zavření okna i z ⌘Q (app.quit). Po potvrzení proto musíme dokončit
+  //   UKONČENÍ aplikace, ne jen zavřít okno — jinak by ⌘Q appku nechal žít v Docku.
+  forceClose = false;            // nové okno (macOS Dock „activate") se zase musí ptát
+  let closing = false;
   win.on('close', async (e) => {
     if(forceClose || SMOKE) return;
     e.preventDefault();
-    let dirty = false;
-    try { dirty = await win.webContents.executeJavaScript('!!(window.CF && CF.state.dirty)'); }
-    catch(err){ dirty = false; }
-    if(dirty){
-      const r = dialog.showMessageBoxSync(win, {
-        type: 'warning',
-        buttons: ['Save & close', 'Discard', 'Cancel'],
-        defaultId: 0,
-        cancelId: 2,
-        message: 'Unsaved changes',
-        detail: 'The chart has unsaved changes. Save before closing?',
-      });
-      if(r === 2) return;
-      if(r === 0){
-        const ok = await win.webContents.executeJavaScript('window.__forgeSave ? __forgeSave() : true').catch(() => false);
-        if(!ok) return; // uživatel zrušil Save As dialog
+    if(closing) return;          // dvojité ⌘Q / klik na křížek během dotazu
+    closing = true;
+    try {
+      let dirty = false;
+      try {
+        dirty = await Promise.race([
+          win.webContents.executeJavaScript('!!(window.CF && CF.state.dirty)'),
+          new Promise(r => setTimeout(() => r(false), 3000)),
+        ]);
+      } catch(err){ dirty = false; }
+      if(dirty){
+        const {response: r} = await dialog.showMessageBox(win, {
+          type: 'warning',
+          buttons: ['Save & close', 'Discard', 'Cancel'],
+          defaultId: 0,
+          cancelId: 2,
+          message: 'Unsaved changes',
+          detail: 'The chart has unsaved changes. Save before closing?',
+        });
+        refocusWin();
+        if(r === 2){ quitting = false; return; }
+        if(r === 0){
+          const ok = await win.webContents.executeJavaScript('window.__forgeSave ? __forgeSave() : true').catch(() => false);
+          if(!ok){ quitting = false; return; }   // uživatel zrušil Save As dialog
+        }
       }
-    }
-    forceClose = true;
-    win.close();
+      forceClose = true;
+      if(quitting) app.quit(); else win.close();
+    } finally { closing = false; }
   });
 
   win.webContents.setWindowOpenHandler(({url}) => {
@@ -383,6 +409,8 @@ ipcMain.on('win:focus', () => {
     try { win.focus(); win.webContents.focus(); } catch(e){}
   }
 });
+// Po nativním dialogu (výběr souboru apod.) vrátit oknu plný vstup — viz refocusWin().
+ipcMain.on('win:refocus', () => refocusWin());
 
 // Auto-fit výchozí výšky: renderer po startu pošle, o kolik px sidebaru chybí místo. Okno se
 // jednorázově zvětší, aby se všechny panely vešly bez posuvníku (a zůstalo vycentrované).
@@ -469,11 +497,12 @@ ipcMain.handle('song:export', async (e, files, folderName, baseDir) => {
   // se bez ptaní přepsalo song.ini i album
   const clash = ['notes.chart', 'notes.mid', 'song.ini'].find(n => fssync.existsSync(path.join(dir, n)));
   if(clash){
-    const c = dialog.showMessageBoxSync(win, {
+    const {response: c} = await dialog.showMessageBox(win, {
       type: 'warning', buttons: ['Overwrite', 'Cancel'], defaultId: 1, cancelId: 1,
       message: 'The song folder already exists',
       detail: safe + ' already contains ' + clash + '. Overwrite the exported files?',
     });
+    refocusWin();
     if(c === 1) return null;
   }
   try {
@@ -514,7 +543,9 @@ function findYtDlp(){
   const dirs = (process.env.PATH || '').split(path.delimiter).concat(MAC_EXTRA_PATHS);
   for(const d of dirs){
     if(!d) continue;
-    try { const p = path.join(d, YTDLP_BIN); if(fssync.existsSync(p)) return p; } catch(e){}
+    for(const name of (IS_MAC ? [YTDLP_BIN, 'yt-dlp'] : [YTDLP_BIN])){
+      try { const p = path.join(d, name); if(fssync.existsSync(p)) return p; } catch(e){}
+    }
   }
   return null;
 }
@@ -525,10 +556,13 @@ function findYtDlp(){
 async function downloadYtDlp(){
   const dir = path.join(app.getPath('userData'), 'tools');
   await fs.mkdir(dir, {recursive: true});
-  const r = await fetch('https://github.com/yt-dlp/yt-dlp/releases/latest/download/' + YTDLP_BIN, {redirect: 'follow'});
-  if(!r.ok) return {error: 'Download failed: HTTP ' + r.status};
+  let r, buf;
+  try {
+    r = await fetch('https://github.com/yt-dlp/yt-dlp/releases/latest/download/' + YTDLP_BIN, {redirect: 'follow'});
+    if(!r.ok) return {error: 'Download failed: HTTP ' + r.status};
+    buf = Buffer.from(await r.arrayBuffer());
+  } catch(err){ return {error: 'Download failed — check your internet connection (' + err.message + ')'}; }
   const dest = path.join(dir, YTDLP_BIN);
-  const buf = Buffer.from(await r.arrayBuffer());
   if(buf.length < 1024 * 1024) return {error: 'Download failed: incomplete file (' + buf.length + ' B)'};
   const tmp = dest + '.tmp';
   try {
@@ -581,11 +615,12 @@ ipcMain.handle('yt:ensure', async () => {
   const found = findYtDlp();
   if(found) return {path: found};
   if(SMOKE) return {error: 'yt-dlp not found (smoke: no download)'};
-  const c = dialog.showMessageBoxSync(win, {
+  const {response: c} = await dialog.showMessageBox(win, {
     type: 'question', buttons: ['Download yt-dlp', 'Cancel'], defaultId: 0, cancelId: 1,
     message: 'yt-dlp is required',
     detail: YTDLP_BIN + ' was not found on this computer. Download the official build from the yt-dlp GitHub releases into the app data folder?',
   });
+  refocusWin();
   if(c === 1) return {error: 'yt-dlp not available'};
   return await downloadYtDlp();
 });
@@ -639,7 +674,7 @@ function findFfmpeg(){
 // potomek přežije rodiče, takže bez tohohle běžel yt-dlp dál skrytě na pozadí a plnil
 // mezipaměť souborem, ke kterému už nic nevedlo.
 const running = new Set();
-app.on('before-quit', () => { for(const p of running){ try { p.kill(); } catch(e){} } running.clear(); });
+app.on('will-quit', () => { for(const p of running){ try { p.kill(); } catch(e){} } running.clear(); });
 function runProc(exe, args){
   return new Promise(resolve => {
     const p = spawn(exe, args, {windowsHide: true});
@@ -809,6 +844,25 @@ ipcMain.handle('video:openDialog', async () => {
 
 // ---------- Menu ----------
 function sendMenu(action){ if(win) win.webContents.send('menu', action); }
+// Zkratky z menu Úpravy: když má fokus textové pole (Metadata, URL, Lyrics…), patří zkratka
+// TOMU poli — Ctrl+Z dřív vracel změny chartu schované pod otevřeným dialogem, zatímco
+// uživatel jen opravoval překlep. Mimo textové pole jde akce do editoru (noty, výběr).
+async function editAction(kind){
+  if(!win || win.isDestroyed()) return;
+  const wc = win.webContents;
+  let inText = false;
+  try {
+    inText = await wc.executeJavaScript(`(() => { const a = document.activeElement; if(!a) return false;
+      if(a.isContentEditable || a.tagName === 'TEXTAREA') return true;
+      return a.tagName === 'INPUT' && !/^(range|checkbox|radio|button|submit|color|file)$/i.test(a.type); })()`);
+  } catch(e){}
+  if(inText){ try { wc[kind](); } catch(e){} return; }
+  if(kind === 'undo' || kind === 'redo') sendMenu(kind);
+  else if(kind === 'copy') sendMenu('copy-sel');
+  else if(kind === 'cut') sendMenu('cut-sel');
+  else if(kind === 'paste') sendMenu('paste-sel');
+  // selectAll mimo pole nemá v editoru obdobu — nic
+}
 
 // ---------- Naposledy otevřené soubory ----------
 // Seznam žije v userData (přežije aktualizaci) a plní ho renderer po každém úspěšném
@@ -920,8 +974,19 @@ function buildMenu(){
     {
       label: 'Edit',
       submenu: [
-        {label: 'Undo', accelerator: 'CmdOrCtrl+Z', click: () => sendMenu('undo')},
-        {label: 'Redo', accelerator: 'CmdOrCtrl+Y', click: () => sendMenu('redo')},
+        {label: 'Undo', accelerator: 'CmdOrCtrl+Z', click: () => editAction('undo')},
+        {label: 'Redo', accelerator: 'CmdOrCtrl+Y', click: () => editAction('redo')},
+        // ⌘⇧Z je na Macu standardní Redo; na Windows funguje jako druhá zkratka
+        {label: 'Redo ', accelerator: 'Shift+CmdOrCtrl+Z', click: () => editAction('redo'), visible: false},
+        // Na macOS chodí ⌘C/⌘X/⌘V/⌘A do textových polí JEN přes menu — bez těchto položek
+        // nešlo vložit odkaz do Import from URL ani text do Metadat/Lyrics.
+        ...(IS_MAC ? [
+          {type: 'separator'},
+          {label: 'Cut', accelerator: 'CmdOrCtrl+X', click: () => editAction('cut')},
+          {label: 'Copy', accelerator: 'CmdOrCtrl+C', click: () => editAction('copy')},
+          {label: 'Paste', accelerator: 'CmdOrCtrl+V', click: () => editAction('paste')},
+          {label: 'Select All', accelerator: 'CmdOrCtrl+A', click: () => editAction('selectAll')},
+        ] : []),
       ],
     },
     {
